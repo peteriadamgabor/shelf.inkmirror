@@ -96,8 +96,10 @@ reports, and the security-headers wrapper.
 | `/api/works/:id` | DELETE | Unpublish. Requires secret. |
 | `/api/works/:id/renew` | POST | Push `expires_at` +30d. Requires secret. |
 | `/api/works/:id/report` | POST | Reporter picks the rule violated + optional note → Discord webhook (reuses feedback handler pattern: honeypot, length caps). |
-| `/w/:id` | GET | Reading page (baked HTML from R2, wrapped with headers + age gate). |
-| `/w/:id/manage` | GET | Manage page. Secret arrives in URL fragment, JS calls the API — the secret never hits server logs. |
+| `/api/works/:id/letters` | POST | Reader → author letter (see Letters). Honeypot + caps + `RL_SHELF_LETTER`; 404s when the author disabled letters. |
+| `/api/works/:id/letters` | GET | Author reads letters. Requires `X-Manage-Secret`. |
+| `/w/:id` | GET | Reading page (baked HTML from R2, wrapped with headers + age gate). Increments `views` via `ctx.waitUntil` with a short per-IP cooldown. |
+| `/w/:id/manage` | GET | Manage page (views count, letters, renew/unpublish). Secret arrives in URL fragment, JS calls the API — the secret never hits server logs. |
 | `/` , `/rules` | GET | Landing + rules page (static). |
 | Cron trigger | daily | Purge works past `expires_at` (D1 row + R2 objects). |
 
@@ -106,7 +108,8 @@ reports, and the security-headers wrapper.
 - Body cap: 10 MB JSON (a 200k-word novel is ~2 MB; generous headroom).
 - Row caps: reuse `MAX_CHAPTERS` / `MAX_BLOCKS` bounds from `format.ts`.
 - Rate limits (CF rate-limit bindings, same pattern as `RL_SYNC_*`):
-  `RL_SHELF_PUBLISH` (e.g. 5/h/IP), `RL_SHELF_MANAGE`, `RL_SHELF_REPORT`.
+  `RL_SHELF_PUBLISH` (e.g. 5/h/IP), `RL_SHELF_MANAGE`, `RL_SHELF_REPORT`,
+  `RL_SHELF_LETTER` (e.g. 5/h/IP).
 - Publishes per manage-secret update: unlimited (author's own work).
 
 **Secrets:** `id` = 11-char base58 (unguessable, URL-friendly);
@@ -139,6 +142,8 @@ CREATE TABLE works (
                 CHECK (status IN ('active','held','removed')),
   listed        INTEGER NOT NULL DEFAULT 0,   -- Phase 3
   password_hash TEXT,                         -- NULL = no password gate
+  views         INTEGER NOT NULL DEFAULT 0,   -- opens, author-only (see below)
+  letters_open  INTEGER NOT NULL DEFAULT 1,   -- author's "accept letters" toggle
   report_count  INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL,
@@ -166,6 +171,39 @@ Phase 2 adds `moderation_verdict` / `moderation_at` columns.
 
 A password cannot be combined with `listed = 1` — a public listing that
 nobody can open is a support burden, not a feature.
+
+### Views (author-only)
+
+`views` counts *opens* of `/w/:id` — incremented in the Worker via
+`ctx.waitUntil` after serving, with a short per-IP cooldown (KV key with
+~10-min TTL) so refresh spam and bots don't inflate it grossly. Shown ONLY on
+the manage page, labeled "opens" (honest: not unique readers). **Never shown
+on the public shelf and never used for ranking** — public counts turn the
+shelf into a leaderboard, which is exactly the social physics this product
+refuses. The shelf sorts by recency and filters, not popularity.
+
+### Letters (reader → author feedback)
+
+Not comments. A quiet "Write to the author" form at the end of a work: the
+letter goes privately to the writer, one-way, no threads, no public trace.
+Reader may optionally leave a contact line if they want an answer.
+
+```sql
+CREATE TABLE letters (
+  id         TEXT PRIMARY KEY,
+  work_id    TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+  body       TEXT NOT NULL,              -- cap 4000 chars
+  contact    TEXT NOT NULL DEFAULT '',   -- cap 200 chars, optional
+  created_at TEXT NOT NULL
+);
+```
+
+Abuse posture = the feedback form's: honeypot field, min-render-to-submit
+gate, length caps, `RL_SHELF_LETTER` per IP, per-work cap (e.g. 500 stored;
+oldest evicted). `letters_open = 0` hides the form and 404s the endpoint.
+Letters are readable/deletable from the manage page only. The author is a
+private recipient, not a moderator — but the letter form still notes that
+hard-line content in letters can be reported.
 
 ## Reading page
 
