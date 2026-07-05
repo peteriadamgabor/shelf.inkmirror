@@ -296,6 +296,105 @@ Worker's verdict is the real one).
 Cost: Haiku-class routing + verification ≈ low single-digit cents per novel.
 The publish rate limit is also the API-budget guard.
 
+## Phase 1.5 — operator toolkit (shipped)
+
+Phase 1 shipped with reactive moderation (report → Discord → human) but no
+tooling for the human. Phase 1.5 is that tooling: one page, one secret, and
+the enforcement primitives the rules page promises.
+
+### Admin surface
+
+- **`GET /admin`** — operator console, same trust model as the manage page:
+  the admin secret rides in the URL *fragment*, lives in JS memory, and
+  travels only as the `X-Admin-Secret` header. The page is static and
+  identical for every visitor. Sections: stats row (works by status, total
+  opens, paused indicator) · panic switch · recent works as mobile-friendly
+  cards (Remove/Restore, inline Re-label, Expiry set, link to `/w/:id`) ·
+  recent reports · tombstone list with delete.
+- **`/api/admin/*`** — all JSON, all authenticated by comparing
+  `sha256(X-Admin-Secret)` against `sha256(env.ADMIN_SECRET)` constant-time,
+  rate-limited via `RL_MANAGE`. When `ADMIN_SECRET` is unset **or** the
+  header is wrong, every admin route answers the exact 404 an unknown route
+  produces — the surface is not discoverable by probing.
+
+| Route | Method | Purpose |
+|-------|--------|---------|
+| `/api/admin/overview` | GET | counts by status, total opens, last 20 works, last 20 reports (joined with work title), pause state, tombstones |
+| `/api/admin/works/:id` | GET | full row (minus secret hashes) + its reports |
+| `/api/admin/works/:id/remove` | POST | `status='removed'`, `removed_at=now`; body `{ tombstone?, note? }` optionally tombstones the content |
+| `/api/admin/works/:id/restore` | POST | back to `active` (only from `removed`) |
+| `/api/admin/works/:id/relabel` | POST | `{ rating, warnings }` from the fixed vocabularies → D1 update + R2 bundle mutate + re-bake; the author's next manage GET shows the corrected labels |
+| `/api/admin/works/:id/expiry` | POST | `{ days: 1..365 }` → `expires_at = now + days` |
+| `/api/admin/pause` | POST | `{ paused }` → `settings.publishing_paused` |
+| `/api/admin/tombstones/:hash` | DELETE | forgive a tombstone |
+
+### Removal lifecycle (grace window)
+
+Operator removal flips `status='removed'` and stamps `removed_at`; readers
+get the same 404 as a nonexistent work, but the D1 row and both R2 objects
+survive so **restore is one click for 30 days**. The daily purge evaporates
+removed works once `removed_at` is older than 30 days (and, conversely,
+removed works are exempt from the ordinary `expires_at` purge while in the
+grace window — removal must not shorten the operator's undo period).
+
+### Tombstones (content bans)
+
+`tombstones(content_hash PRIMARY KEY, work_title, created_at, note)`.
+The hash is `sha256Hex(blocks.map(content).join(' '))` with blocks ordered by
+**(chapter order, block order)** — deliberately blind to title, pen name,
+rating, warnings, marks, and ids, so a removed work re-uploaded under a new
+identity still matches. Any single character of prose changed produces a new
+hash: a tombstone is a takedown record, not a similarity net (that would be
+Phase 2's LLM job).
+
+Both `POST /api/publish` and `PUT /api/works/:id` check, after validation
+and before any write:
+
+1. **Panic switch** — `settings.publishing_paused = '1'` → `503
+   { error: 'publishing_paused', message: 'The Shelf is temporarily closed
+   for new works.' }` (the message is human because InkMirror surfaces it
+   as-is).
+2. **Tombstone match** → flat `403 { error: 'not_acceptable' }` with no
+   detail — no oracle telling an abuser what exactly got them removed or
+   how far a mutation must go.
+
+### Reports in D1
+
+Every **accepted** report (past honeypot, render-time gate, and optional
+Turnstile) is inserted into `reports(id, work_id, reason, message,
+created_at)` and bumps `works.report_count` **before** the Discord forward —
+Discord failing (or being unconfigured) no longer loses reports; it is the
+doorbell, D1 is the record. Reports for a purged/unpublished work are
+deleted with it.
+
+**Nothing about the reporter is stored** — no IP, no hash, no cookie — by
+decision. Consequently there are no per-source bans; that was considered and
+consciously skipped (IP bans are trivially evaded and the privacy cost is
+permanent). The same privacy stance applies to publishers: no publisher
+IPs/fingerprints are recorded, so enforcement is content-shaped (tombstones)
+rather than person-shaped.
+
+### Live report page
+
+Baked reading pages no longer embed the report form; their footer links to
+**`GET /w/:id/report`**, a Worker-rendered (live) page with the same fields,
+honeypot, and render-time gate. This decouples the evolving form from baked
+HTML — old baked pages with the inline form keep working against the same
+POST endpoint.
+
+**Turnstile (optional):** when `TURNSTILE_SITE_KEY` and
+`TURNSTILE_SECRET_KEY` are both set, the report page embeds the widget and
+the POST handler verifies `cf-turnstile-response` against `siteverify`
+(403 on failure). Unset = current honeypot-only behavior. The CSP relaxation
+(`script-src`/`frame-src https://challenges.cloudflare.com`) applies to this
+one page only; every other page keeps the strict inline-only policy.
+
+### Config
+
+New optional secrets: `ADMIN_SECRET`, `TURNSTILE_SITE_KEY`,
+`TURNSTILE_SECRET_KEY`. Migration `0002_admin.sql` adds `works.removed_at`,
+`reports`, `tombstones`, `settings`.
+
 ## Phase 3 — the shelf (sketch, own spec later)
 
 - `GET /shelf` — browse page: generated-typography covers, title, pen-name,
@@ -326,6 +425,9 @@ The publish rate limit is also the API-budget guard.
    cron) + baked renderer + server re-validation · InkMirror repo: publish
    exporter with strip rules + PublishModal + IDB `publications` (schema v6)
    + i18n.
+2.5. **Phase 1.5 (1 day):** operator toolkit — /admin console, admin API,
+   removal grace window, tombstones, panic switch, reports in D1, live
+   report page with optional Turnstile. See the Phase 1.5 section above.
 3. **Phase 2 (~1–2 days):** moderation chain in shadow mode.
 4. **Phase 3 (~1–2 days):** browse page + gate flip.
 
