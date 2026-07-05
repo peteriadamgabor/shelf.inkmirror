@@ -2,16 +2,15 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "inkmirror-shelf",
 	"main": "src/worker.ts",
-	"compatibility_date": "2026-07-05",
+	"account_id": "97696f7e672a7deea8c80ab041a6ed1e",
+	// Newest date the pinned wrangler 4.87.0 runtime (workerd) supports.
+	"compatibility_date": "2026-05-07",
 
 	// Custom domain — attach once DNS for shelf.inkmirror.cc exists:
 	"routes": [
 		{ "pattern": "shelf.inkmirror.cc", "custom_domain": true }
 	],
 
-	// Create the resources, then fill in the D1 id:
-	//   npx wrangler r2 bucket create inkmirror-shelf
-	//   npx wrangler d1 create inkmirror-shelf   → paste database_id below
 	"r2_buckets": [
 		{ "binding": "SHELF_R2", "bucket_name": "inkmirror-shelf" }
 	],
@@ -19,18 +18,21 @@
 		{
 			"binding": "SHELF_DB",
 			"database_name": "inkmirror-shelf",
-			"database_id": "TODO-paste-after-d1-create"
+			"database_id": "e11b70cc-3cc9-45d5-956a-e9eb0a484517",
+			"migrations_dir": "migrations"
 		}
 	],
 
 	// Same rate-limit binding pattern as the InkMirror worker.
+	// NOTE: Cloudflare ratelimit bindings only accept period 10 or 60 — the
+	// spec's "5/h" budgets are approximated as small per-minute allowances.
 	"unsafe": {
 		"bindings": [
 			{
 				"name": "RL_PUBLISH",
 				"type": "ratelimit",
 				"namespace_id": "3001",
-				"simple": { "limit": 5, "period": 3600 }
+				"simple": { "limit": 2, "period": 60 }
 			},
 			{
 				"name": "RL_MANAGE",
@@ -42,7 +44,15 @@
 				"name": "RL_REPORT",
 				"type": "ratelimit",
 				"namespace_id": "3003",
-				"simple": { "limit": 5, "period": 3600 }
+				"simple": { "limit": 2, "period": 60 }
+			},
+			{
+				// Per-IP-per-work cooldown for view counting on /w/:id —
+				// one counted open per minute per (ip, work).
+				"name": "RL_VIEWS",
+				"type": "ratelimit",
+				"namespace_id": "3004",
+				"simple": { "limit": 1, "period": 60 }
 			}
 		]
 	},
