@@ -1,0 +1,58 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "inkmirror-shelf",
+	"main": "src/worker.ts",
+	"compatibility_date": "2026-07-05",
+
+	// Custom domain — attach once DNS for shelf.inkmirror.cc exists:
+	"routes": [
+		{ "pattern": "shelf.inkmirror.cc", "custom_domain": true }
+	],
+
+	// Create the resources, then fill in the D1 id:
+	//   npx wrangler r2 bucket create inkmirror-shelf
+	//   npx wrangler d1 create inkmirror-shelf   → paste database_id below
+	"r2_buckets": [
+		{ "binding": "SHELF_R2", "bucket_name": "inkmirror-shelf" }
+	],
+	"d1_databases": [
+		{
+			"binding": "SHELF_DB",
+			"database_name": "inkmirror-shelf",
+			"database_id": "TODO-paste-after-d1-create"
+		}
+	],
+
+	// Same rate-limit binding pattern as the InkMirror worker.
+	"unsafe": {
+		"bindings": [
+			{
+				"name": "RL_PUBLISH",
+				"type": "ratelimit",
+				"namespace_id": "3001",
+				"simple": { "limit": 5, "period": 3600 }
+			},
+			{
+				"name": "RL_MANAGE",
+				"type": "ratelimit",
+				"namespace_id": "3002",
+				"simple": { "limit": 30, "period": 60 }
+			},
+			{
+				"name": "RL_REPORT",
+				"type": "ratelimit",
+				"namespace_id": "3003",
+				"simple": { "limit": 5, "period": 3600 }
+			}
+		]
+	},
+
+	// Daily purge of expired works.
+	"triggers": {
+		"crons": ["17 4 * * *"]
+	}
+
+	// Secrets (set via `npx wrangler secret put`):
+	//   DISCORD_WEBHOOK        — report + moderation-hold notifications
+	//   ANTHROPIC_API_KEY      — Phase 2 moderation chain
+}
