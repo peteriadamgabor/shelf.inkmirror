@@ -14,4 +14,17 @@ export interface Env {
   DISCORD_WEBHOOK?: string;
   /** Phase 2 moderation chain. Wrangler Secret. */
   ANTHROPIC_API_KEY?: string;
+  /**
+   * Operator toolkit auth (X-Admin-Secret on /api/admin/*). Wrangler Secret.
+   * Unset = the whole admin surface answers 404, indistinguishable from an
+   * unknown route.
+   */
+  ADMIN_SECRET?: string;
+  /**
+   * Optional Cloudflare Turnstile on the /w/:id/report page. BOTH must be
+   * set to enable the widget + server-side verification; either unset =
+   * current honeypot-only behavior. Wrangler Secrets.
+   */
+  TURNSTILE_SITE_KEY?: string;
+  TURNSTILE_SECRET_KEY?: string;
 }

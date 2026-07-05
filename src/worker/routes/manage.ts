@@ -13,7 +13,7 @@ import type { Env } from '../lib/env';
 import { constantTimeEqualHex, sha256Hex } from '../lib/crypto';
 import { bundleKey, deleteWork, getWork, pageKey, renewWork, updateWork, type WorkRow } from '../lib/db';
 import { MAX_PUBLISH_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
-import { WORK_TTL_MS, workUrl } from './publish';
+import { WORK_TTL_MS, publishGates, workUrl } from './publish';
 
 /** The one 404 every unauthenticated/unknown case returns. */
 function notFound(): Response {
@@ -97,6 +97,11 @@ async function update(request: Request, env: Env, row: WorkRow): Promise<Respons
   } catch (e) {
     return jsonError(400, 'invalid_bundle', e instanceof Error ? e.message : 'validation failed');
   }
+
+  // Updates pass the same operator gates as first publishes — a tombstoned
+  // text must not slip back in as an "update" to an unrelated work.
+  const gate = await publishGates(env, parsed);
+  if (gate !== null) return gate;
 
   const html = renderWorkPage(parsed, { id: row.id });
   await env.SHELF_R2.put(bundleKey(row.id), JSON.stringify(parsed), {

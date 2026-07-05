@@ -5,23 +5,44 @@
  * honeypot ("website" must stay empty) and a min-render-time gate (the `ts`
  * field is stamped by inline JS at page load; a submit younger than 2s is a
  * bot). Both trip wires answer with SUCCESS and forward nothing, so bots
- * don't retry. Nothing is persisted here — Discord is the queue.
+ * don't retry.
+ *
+ * Phase 1.5: every ACCEPTED report is mirrored into D1 (reports table +
+ * works.report_count) BEFORE the Discord forward — Discord failing must not
+ * lose the record. Nothing about the reporter is stored, by decision.
+ * Optionally, when both TURNSTILE_* secrets are set, the submit must carry a
+ * valid cf-turnstile-response (the live /w/:id/report page embeds the widget).
  */
 
 import type { Env } from '../lib/env';
 import { escapeHtml, htmlResponse, pageShell } from '../../html';
+import { randomBase64Url } from '../lib/crypto';
+import { getWork, incrementReportCount, insertReport } from '../lib/db';
 import { MAX_REPORT_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
 import { workUrl } from './publish';
+import { notFoundPage } from './read';
 
-const REPORT_REASONS = new Set(['mislabeled', 'hard-line', 'plagiarism', 'other']);
+export const REPORT_REASONS = new Set(['mislabeled', 'hard-line', 'plagiarism', 'other']);
 const MAX_MESSAGE = 1000;
 const MIN_RENDER_MS = 2000;
+
+const TURNSTILE_VERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
+
+export function turnstileEnabled(env: Env): boolean {
+  return (
+    env.TURNSTILE_SITE_KEY !== undefined &&
+    env.TURNSTILE_SITE_KEY.length > 0 &&
+    env.TURNSTILE_SECRET_KEY !== undefined &&
+    env.TURNSTILE_SECRET_KEY.length > 0
+  );
+}
 
 interface ReportFields {
   reason: string;
   message: string;
   website: string;
   ts: number;
+  turnstileToken: string;
 }
 
 function confirmationPage(workId: string): Response {
@@ -64,6 +85,7 @@ async function parseFields(request: Request): Promise<{ fields: ReportFields; is
         message: pick(rec['message']),
         website: pick(rec['website']),
         ts: typeof tsRaw === 'number' ? tsRaw : Number(pick(tsRaw)),
+        turnstileToken: pick(rec['cf-turnstile-response']),
       },
     };
   }
@@ -76,6 +98,7 @@ async function parseFields(request: Request): Promise<{ fields: ReportFields; is
       message: params.get('message') ?? '',
       website: params.get('website') ?? '',
       ts: Number(params.get('ts') ?? ''),
+      turnstileToken: params.get('cf-turnstile-response') ?? '',
     },
   };
 }
@@ -85,8 +108,34 @@ function sanitizeMarkdown(s: string): string {
   return s.replace(/[\\*_~`>|[\]()#@]/g, '\\$&');
 }
 
+/** POST the token to siteverify; only an explicit success passes. */
+async function verifyTurnstile(env: Env, token: string, ip: string): Promise<boolean> {
+  if (token.length === 0 || token.length > 2048) return false;
+  const secretKey = env.TURNSTILE_SECRET_KEY;
+  if (secretKey === undefined) return false;
+  const params = new URLSearchParams({ secret: secretKey, response: token });
+  if (ip !== 'unknown') params.set('remoteip', ip);
+  try {
+    const resp = await fetch(TURNSTILE_VERIFY_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+    if (!resp.ok) return false;
+    const outcome: unknown = await resp.json();
+    return (
+      typeof outcome === 'object' &&
+      outcome !== null &&
+      (outcome as Record<string, unknown>)['success'] === true
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function handleReport(request: Request, env: Env, id: string): Promise<Response> {
-  const rl = await env.RL_REPORT.limit({ key: clientIp(request) });
+  const ip = clientIp(request);
+  const rl = await env.RL_REPORT.limit({ key: ip });
   if (!rl.success) return jsonError(429, 'rate_limited');
 
   const parsed = await parseFields(request);
@@ -95,44 +144,144 @@ export async function handleReport(request: Request, env: Env, id: string): Prom
 
   const ok = (): Response => (isJson ? Response.json({ ok: true }) : confirmationPage(id));
 
-  // Honeypot filled, or the render-time gate failed → silent success, no forward.
+  // Honeypot filled, or the render-time gate failed → silent success, nothing stored.
   if (fields.website.trim().length > 0) return ok();
   if (!Number.isFinite(fields.ts) || Date.now() - fields.ts < MIN_RENDER_MS) return ok();
+
+  if (turnstileEnabled(env) && !(await verifyTurnstile(env, fields.turnstileToken, ip))) {
+    return jsonError(403, 'verification_failed');
+  }
 
   if (!REPORT_REASONS.has(fields.reason)) return jsonError(400, 'invalid_reason');
   const message = fields.message.trim();
   if (message.length > MAX_MESSAGE) return jsonError(400, 'message_too_long');
 
-  if (env.DISCORD_WEBHOOK === undefined || env.DISCORD_WEBHOOK.length === 0) {
-    return jsonError(503, 'reports_not_configured');
-  }
-
-  const discordBody = {
-    content: '**Shelf report**',
-    embeds: [
-      {
-        title: `Report: ${fields.reason}`,
-        description: message.length > 0 ? sanitizeMarkdown(message).slice(0, 2000) : '_no message_',
-        color: 0xd85a30,
-        fields: [
-          { name: 'Work', value: id, inline: true },
-          { name: 'URL', value: workUrl(id), inline: false },
-        ],
-        timestamp: new Date().toISOString(),
-      },
-    ],
-    allowed_mentions: { parse: [] as string[] },
-  };
-
-  const resp = await fetch(env.DISCORD_WEBHOOK, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(discordBody),
+  // D1 first — the durable record. Discord is only the doorbell.
+  await insertReport(env.SHELF_DB, {
+    id: randomBase64Url(16),
+    work_id: id,
+    reason: fields.reason,
+    message,
+    created_at: new Date().toISOString(),
   });
-  if (!resp.ok) {
-    console.error(`[report] discord webhook failed status=${resp.status}`);
-    return jsonError(502, 'delivery_failed');
+  await incrementReportCount(env.SHELF_DB, id);
+
+  if (env.DISCORD_WEBHOOK !== undefined && env.DISCORD_WEBHOOK.length > 0) {
+    const discordBody = {
+      content: '**Shelf report**',
+      embeds: [
+        {
+          title: `Report: ${fields.reason}`,
+          description: message.length > 0 ? sanitizeMarkdown(message).slice(0, 2000) : '_no message_',
+          color: 0xd85a30,
+          fields: [
+            { name: 'Work', value: id, inline: true },
+            { name: 'URL', value: workUrl(id), inline: false },
+          ],
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      allowed_mentions: { parse: [] as string[] },
+    };
+
+    try {
+      const resp = await fetch(env.DISCORD_WEBHOOK, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(discordBody),
+      });
+      if (!resp.ok) console.error(`[report] discord webhook failed status=${resp.status}`);
+    } catch (e) {
+      console.error(`[report] discord webhook unreachable: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   return ok();
+}
+
+// ---------- GET /w/:id/report — the live report page ----------
+
+const REPORT_TS_JS = `(function(){var f=document.getElementById('report-ts');if(f)f.value=String(Date.now());})();`;
+
+const REPORT_PAGE_CSS = `
+.report-form{display:grid;gap:.8rem;margin:1.2rem 0 0}
+.report-form label{display:grid;gap:.3rem;font-size:.9rem}
+.report-form select,.report-form textarea{
+  font:inherit;color:var(--ink);background:var(--surface);
+  border:1px solid var(--line);border-radius:8px;padding:.5rem .65rem;
+}
+.report-form .btn{justify-self:start}
+.hp{position:absolute!important;left:-9999px!important;width:1px;height:1px;opacity:0;pointer-events:none}
+.work-ref{color:var(--muted);font-size:.95rem;margin:.2rem 0 0}
+`;
+
+/**
+ * CSP for this page only: the Turnstile widget needs its external script and
+ * its challenge iframe. Every other page keeps the strict inline-only CSP.
+ */
+const TURNSTILE_CSP =
+  "default-src 'none'; " +
+  "style-src 'unsafe-inline'; " +
+  "script-src 'unsafe-inline' https://challenges.cloudflare.com; " +
+  "frame-src https://challenges.cloudflare.com; " +
+  "connect-src 'self'; " +
+  "img-src 'self' data:; " +
+  "form-action 'self'; " +
+  "base-uri 'none'; " +
+  "frame-ancestors 'none'";
+
+/**
+ * Worker-rendered (live, not baked) report page. Newly baked reading pages
+ * link here instead of embedding the form, so the form can evolve (fields,
+ * Turnstile) without re-baking every published work. Old baked pages still
+ * POST their inline form directly to the API — that keeps working.
+ */
+export async function reportPage(env: Env, id: string): Promise<Response> {
+  const row = await getWork(env.SHELF_DB, id);
+  if (row === null || row.status !== 'active') return notFoundPage();
+  const expiresMs = Date.parse(row.expires_at);
+  if (Number.isFinite(expiresMs) && expiresMs < Date.now()) return notFoundPage();
+  return buildReportPage(env, id, row.title, row.pen_name);
+}
+
+function buildReportPage(env: Env, id: string, title: string, penName: string): Response {
+  const withTurnstile = turnstileEnabled(env);
+  const widget = withTurnstile
+    ? `<div class="cf-turnstile" data-sitekey="${escapeHtml(env.TURNSTILE_SITE_KEY ?? '')}"></div>`
+    : '';
+  const head = withTurnstile
+    ? '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>'
+    : '';
+
+  const body = `<div class="page">
+<h1>Report this work</h1>
+<p class="work-ref">&ldquo;${escapeHtml(title)}&rdquo; by ${escapeHtml(penName)}</p>
+<p class="muted small">Reports are reviewed against the <a href="/rules">Shelf rules</a> by a human.
+Mislabeling and hard-line violations are acted on; disliking a story is not a violation.</p>
+<form method="post" action="/api/works/${escapeHtml(id)}/report" class="report-form">
+<label>Reason
+<select name="reason" required>
+<option value="mislabeled">Mislabeled (rating or warnings are dishonest)</option>
+<option value="hard-line">Hard-line content (minors / doxxing / illegal)</option>
+<option value="plagiarism">Plagiarism</option>
+<option value="other">Other</option>
+</select>
+</label>
+<label>Details (optional)
+<textarea name="message" maxlength="1000" rows="5"></textarea>
+</label>
+<input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+<input type="hidden" name="ts" id="report-ts" value="">
+${widget}
+<button type="submit" class="btn">Send report</button>
+</form>
+<p class="muted small"><a href="/w/${escapeHtml(id)}">Back to the work</a></p>
+</div>
+<script>${REPORT_TS_JS}</script>`;
+
+  return htmlResponse(
+    pageShell({ title: 'Report — The Shelf', css: REPORT_PAGE_CSS, body, head }),
+    200,
+    withTurnstile ? { 'content-security-policy': TURNSTILE_CSP } : undefined,
+  );
 }

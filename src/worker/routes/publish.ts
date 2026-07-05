@@ -7,17 +7,42 @@
  * touches R2 or D1.
  */
 
-import { isPublishBundle, validatePublishBundle } from '../../format';
+import { isPublishBundle, validatePublishBundle, type PublishBundleV1 } from '../../format';
 import { countWords, firstLine, renderWorkPage } from '../../render';
 import type { Env } from '../lib/env';
 import { randomBase64Url, sha256Hex } from '../lib/crypto';
-import { bundleKey, insertWork, pageKey } from '../lib/db';
+import { contentHash } from '../lib/content-hash';
+import { bundleKey, getSetting, hasTombstone, insertWork, pageKey } from '../lib/db';
 import { MAX_PUBLISH_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
 
 export const WORK_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
+export const PAUSED_KEY = 'publishing_paused';
+
 export function workUrl(id: string): string {
   return `https://shelf.inkmirror.cc/w/${id}`;
+}
+
+/**
+ * Operator gates, checked after validation and before any R2/D1 write, on
+ * both first publish and update:
+ *   - panic switch: settings.publishing_paused = '1' → 503 with a human
+ *     message InkMirror can surface as-is;
+ *   - tombstones: content matching a removed work's hash → flat 403 with no
+ *     detail (no oracle for someone probing what exactly got them removed).
+ * Returns the error response, or null when the gates are open.
+ */
+export async function publishGates(env: Env, bundle: PublishBundleV1): Promise<Response | null> {
+  if ((await getSetting(env.SHELF_DB, PAUSED_KEY)) === '1') {
+    return Response.json(
+      { error: 'publishing_paused', message: 'The Shelf is temporarily closed for new works.' },
+      { status: 503 },
+    );
+  }
+  if (await hasTombstone(env.SHELF_DB, await contentHash(bundle))) {
+    return jsonError(403, 'not_acceptable');
+  }
+  return null;
 }
 
 export async function handlePublish(request: Request, env: Env): Promise<Response> {
@@ -39,6 +64,9 @@ export async function handlePublish(request: Request, env: Env): Promise<Respons
   } catch (e) {
     return jsonError(400, 'invalid_bundle', e instanceof Error ? e.message : 'validation failed');
   }
+
+  const gate = await publishGates(env, parsed);
+  if (gate !== null) return gate;
 
   const id = randomBase64Url(16); // 22 chars — the capability for unlisted works
   const manageSecret = randomBase64Url(32);
