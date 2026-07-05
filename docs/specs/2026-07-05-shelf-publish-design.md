@@ -242,10 +242,18 @@ code. New feature module `src/ui/features/PublishModal.tsx` +
 3. First publish must acknowledge the rules (link to `/rules`), stored per
    browser.
 4. POST to `shelf.inkmirror.cc/api/publish`; on success store
-   `{ workId, url, manageSecret, publishedAt, rating }` in a new IDB store
-   `publications` (keyed by document id) — schema v6 migration.
+   `{ workId, documentId, scope, url, manageSecret, publishedAt, rating }`
+   in a new IDB store `publications` — keyed by `workId`, indexed by
+   `documentId`, because one document may yield several published works
+   (chapters 1–3 as a teaser, the full book as another) — schema v6
+   migration. The document's own UUID never travels in the bundle; this
+   store is the only place the local↔published link exists.
 5. Published documents show a "published" chip with Update / Unpublish /
    Copy-link actions (call the manage API directly with the stored secret).
+   Updates are explicit snapshot pushes (PUT → server re-validates,
+   re-strips, re-bakes) — never automatic on save. The chip may hint
+   "published version behind local" by comparing timestamps, but the
+   writer decides when a new version faces readers.
 
 All strings through `t()`, en + hu from day one.
 
