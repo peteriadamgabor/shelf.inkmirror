@@ -138,6 +138,7 @@ CREATE TABLE works (
   status        TEXT NOT NULL DEFAULT 'active'
                 CHECK (status IN ('active','held','removed')),
   listed        INTEGER NOT NULL DEFAULT 0,   -- Phase 3
+  password_hash TEXT,                         -- NULL = no password gate
   report_count  INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL,
@@ -146,6 +147,25 @@ CREATE TABLE works (
 ```
 
 Phase 2 adds `moderation_verdict` / `moderation_at` columns.
+
+### Visibility tiers (per-work, chosen in the publish modal)
+
+1. **Unlisted link** (default) — anyone with the link reads; listed nowhere,
+   `noindex`. Reactive moderation (report → takedown).
+2. **Password-locked** — link + password the author shares personally (beta
+   readers, writing circles). Optional `password_hash` (argon2id or
+   scrypt via WebCrypto-available KDF; decide at implementation) gates the
+   page: POST password → HttpOnly cookie scoped to `/w/:id` → baked HTML
+   served. Attempts rate-limited per IP. Effectively private, so no
+   moderation gate. Content remains plaintext server-side so takedown and
+   re-bake keep working; a future client-side-encrypted tier could serve
+   true zero-knowledge drafts but is out of scope (breaks server
+   re-validation and report review).
+3. **On the shelf** (Phase 3) — publicly listed; the only tier that pays the
+   moderation toll. `listed = 1`, exempt from auto-expiry while listed.
+
+A password cannot be combined with `listed = 1` — a public listing that
+nobody can open is a support burden, not a feature.
 
 ## Reading page
 
