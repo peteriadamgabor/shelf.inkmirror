@@ -112,9 +112,12 @@ reports, and the security-headers wrapper.
   `RL_SHELF_LETTER` (e.g. 5/h/IP).
 - Publishes per manage-secret update: unlimited (author's own work).
 
-**Secrets:** `id` = 11-char base58 (unguessable, URL-friendly);
-`manageSecret` = 32 bytes base64url. D1 stores only `sha256(secret)`;
-comparison is constant-time (reuse `constantTimeEqualBytes` from sync).
+**Secrets:** `id` = 16 random bytes base64url (22 chars, 128 bits — the id
+IS the capability for unlisted works, so it matches the sync layer's syncId
+entropy; stronger than a UUIDv4 and shorter in the URL). `manageSecret` =
+32 bytes base64url. D1 stores only `sha256(secret)`; comparison is
+constant-time (reuse `constantTimeEqualBytes` from sync). Both come from
+`crypto.getRandomValues` — never `Math.random`, never sequential.
 
 ## Storage
 

@@ -33,7 +33,9 @@ export interface Env {
 /** Only the editor may call the publish API cross-origin. */
 const PUBLISH_ALLOWED_ORIGIN = 'https://inkmirror.cc';
 
-const WORK_ID_RE = /^[1-9A-HJ-NP-Za-km-z]{11}$/; // base58, no 0OIl
+// 16 random bytes, base64url — 128 bits. The id IS the capability for
+// unlisted works, so it gets the same entropy as the sync layer's syncId.
+const WORK_ID_RE = /^[A-Za-z0-9_-]{22}$/;
 
 function notImplemented(what: string): Response {
   return Response.json({ error: `${what}: not implemented yet` }, { status: 501 });
