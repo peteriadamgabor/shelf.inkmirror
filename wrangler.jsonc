@@ -65,4 +65,8 @@
 	// Secrets (set via `npx wrangler secret put`):
 	//   DISCORD_WEBHOOK        — report + moderation-hold notifications
 	//   ANTHROPIC_API_KEY      — Phase 2 moderation chain
+	//   ADMIN_SECRET           — operator toolkit (/admin + /api/admin/*);
+	//                            unset = the whole admin surface answers 404
+	//   TURNSTILE_SITE_KEY     — optional Turnstile on /w/:id/report; BOTH
+	//   TURNSTILE_SECRET_KEY     must be set to enable widget + verification
 }
