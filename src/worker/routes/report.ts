@@ -1,0 +1,138 @@
+/**
+ * POST /api/works/:id/report — reader reports a rule violation.
+ *
+ * Same abuse posture as InkMirror's feedback form: rate limit first, then
+ * honeypot ("website" must stay empty) and a min-render-time gate (the `ts`
+ * field is stamped by inline JS at page load; a submit younger than 2s is a
+ * bot). Both trip wires answer with SUCCESS and forward nothing, so bots
+ * don't retry. Nothing is persisted here — Discord is the queue.
+ */
+
+import type { Env } from '../lib/env';
+import { escapeHtml, htmlResponse, pageShell } from '../../html';
+import { MAX_REPORT_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
+import { workUrl } from './publish';
+
+const REPORT_REASONS = new Set(['mislabeled', 'hard-line', 'plagiarism', 'other']);
+const MAX_MESSAGE = 1000;
+const MIN_RENDER_MS = 2000;
+
+interface ReportFields {
+  reason: string;
+  message: string;
+  website: string;
+  ts: number;
+}
+
+function confirmationPage(workId: string): Response {
+  return htmlResponse(
+    pageShell({
+      title: 'Report received — The Shelf',
+      body: `<div class="page">
+<h1>Thank you</h1>
+<p>Your report has been received — a human will look at this.</p>
+<p class="muted small">Reports are reviewed against the <a href="/rules">Shelf rules</a>. Mislabeling and hard-line
+violations are acted on; disliking a story is not a violation.</p>
+<p><a class="btn" href="/w/${escapeHtml(workId)}">Back to the work</a></p>
+</div>`,
+    }),
+  );
+}
+
+async function parseFields(request: Request): Promise<{ fields: ReportFields; isJson: boolean } | null> {
+  const contentType = (request.headers.get('content-type') ?? '').toLowerCase();
+  const isJson = contentType.includes('application/json');
+
+  const text = await readBodyCapped(request, MAX_REPORT_BODY_BYTES);
+  if (text === null) return null;
+
+  const pick = (v: unknown): string => (typeof v === 'string' ? v : '');
+  if (isJson) {
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return null;
+    }
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) return null;
+    const rec = body as Record<string, unknown>;
+    const tsRaw = rec['ts'];
+    return {
+      isJson,
+      fields: {
+        reason: pick(rec['reason']),
+        message: pick(rec['message']),
+        website: pick(rec['website']),
+        ts: typeof tsRaw === 'number' ? tsRaw : Number(pick(tsRaw)),
+      },
+    };
+  }
+
+  const params = new URLSearchParams(text);
+  return {
+    isJson,
+    fields: {
+      reason: params.get('reason') ?? '',
+      message: params.get('message') ?? '',
+      website: params.get('website') ?? '',
+      ts: Number(params.get('ts') ?? ''),
+    },
+  };
+}
+
+/** Backslash-escape Discord markdown so reporter text can't render as links/mentions. */
+function sanitizeMarkdown(s: string): string {
+  return s.replace(/[\\*_~`>|[\]()#@]/g, '\\$&');
+}
+
+export async function handleReport(request: Request, env: Env, id: string): Promise<Response> {
+  const rl = await env.RL_REPORT.limit({ key: clientIp(request) });
+  if (!rl.success) return jsonError(429, 'rate_limited');
+
+  const parsed = await parseFields(request);
+  if (parsed === null) return jsonError(400, 'invalid_body');
+  const { fields, isJson } = parsed;
+
+  const ok = (): Response => (isJson ? Response.json({ ok: true }) : confirmationPage(id));
+
+  // Honeypot filled, or the render-time gate failed → silent success, no forward.
+  if (fields.website.trim().length > 0) return ok();
+  if (!Number.isFinite(fields.ts) || Date.now() - fields.ts < MIN_RENDER_MS) return ok();
+
+  if (!REPORT_REASONS.has(fields.reason)) return jsonError(400, 'invalid_reason');
+  const message = fields.message.trim();
+  if (message.length > MAX_MESSAGE) return jsonError(400, 'message_too_long');
+
+  if (env.DISCORD_WEBHOOK === undefined || env.DISCORD_WEBHOOK.length === 0) {
+    return jsonError(503, 'reports_not_configured');
+  }
+
+  const discordBody = {
+    content: '**Shelf report**',
+    embeds: [
+      {
+        title: `Report: ${fields.reason}`,
+        description: message.length > 0 ? sanitizeMarkdown(message).slice(0, 2000) : '_no message_',
+        color: 0xd85a30,
+        fields: [
+          { name: 'Work', value: id, inline: true },
+          { name: 'URL', value: workUrl(id), inline: false },
+        ],
+        timestamp: new Date().toISOString(),
+      },
+    ],
+    allowed_mentions: { parse: [] as string[] },
+  };
+
+  const resp = await fetch(env.DISCORD_WEBHOOK, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(discordBody),
+  });
+  if (!resp.ok) {
+    console.error(`[report] discord webhook failed status=${resp.status}`);
+    return jsonError(502, 'delivery_failed');
+  }
+
+  return ok();
+}

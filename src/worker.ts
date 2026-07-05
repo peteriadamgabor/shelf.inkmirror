@@ -1,8 +1,9 @@
 /**
  * The Shelf — Cloudflare Worker entry (shelf.inkmirror.cc).
  *
- * Routes (Phase 1 — currently stubs, see docs/specs/):
+ * Routes (Phase 1):
  *   POST   /api/publish           validate + bake + store → { id, url, manageSecret }
+ *   GET    /api/works/:id         meta JSON                      [X-Manage-Secret]
  *   PUT    /api/works/:id         replace content (re-bake)      [X-Manage-Secret]
  *   DELETE /api/works/:id         unpublish                      [X-Manage-Secret]
  *   POST   /api/works/:id/renew   push expiry +30d               [X-Manage-Secret]
@@ -14,32 +15,36 @@
  *   cron   daily                  purge works past expires_at (D1 row + R2 objects)
  */
 
-interface RateLimit {
-  limit(opts: { key: string }): Promise<{ success: boolean }>;
-}
+import type { Env } from './worker/lib/env';
+import { WORK_ID_RE, preflightResponse, withCors } from './worker/lib/http';
+import { bundleKey, deleteWork, listExpired, pageKey } from './worker/lib/db';
+import { handlePublish } from './worker/routes/publish';
+import { handleManage } from './worker/routes/manage';
+import { handleReport } from './worker/routes/report';
+import { handleRead, notFoundPage } from './worker/routes/read';
+import { landingPage } from './worker/pages/landing';
+import { rulesPage } from './worker/pages/rules';
+import { managePage } from './worker/pages/manage-page';
 
-export interface Env {
-  SHELF_R2: R2Bucket;
-  SHELF_DB: D1Database;
-  RL_PUBLISH: RateLimit;
-  RL_MANAGE: RateLimit;
-  RL_REPORT: RateLimit;
-  /** Report + moderation-hold notifications. Wrangler Secret. */
-  DISCORD_WEBHOOK?: string;
-  /** Phase 2 moderation chain. Wrangler Secret. */
-  ANTHROPIC_API_KEY?: string;
-}
+// NOTE: the Worker entry module may only export handlers (workerd rejects
+// value exports) — shared constants (WORK_ID_RE, PUBLISH_ALLOWED_ORIGIN)
+// live in src/worker/lib/http.ts.
+export type { Env };
 
-/** Only the editor may call the publish API cross-origin. */
-const PUBLISH_ALLOWED_ORIGIN = 'https://inkmirror.cc';
-
-// 16 random bytes, base64url — 128 bits. The id IS the capability for
-// unlisted works, so it gets the same entropy as the sync layer's syncId.
-const WORK_ID_RE = /^[A-Za-z0-9_-]{22}$/;
-
-function notImplemented(what: string): Response {
-  return Response.json({ error: `${what}: not implemented yet` }, { status: 501 });
-}
+/**
+ * Strict CSP for Worker-generated HTML. Everything is inline by design
+ * (no external assets can exist under default-src 'none'); connect-src
+ * 'self' is required by the manage page's same-origin API calls.
+ */
+const HTML_CSP =
+  "default-src 'none'; " +
+  "style-src 'unsafe-inline'; " +
+  "script-src 'unsafe-inline'; " +
+  "connect-src 'self'; " +
+  "img-src 'self' data:; " +
+  "form-action 'self'; " +
+  "base-uri 'none'; " +
+  "frame-ancestors 'none'";
 
 function withBaseHeaders(res: Response): Response {
   const headers = new Headers(res.headers);
@@ -47,51 +52,83 @@ function withBaseHeaders(res: Response): Response {
   headers.set('referrer-policy', 'no-referrer');
   // Published pages are shareable but never indexable.
   headers.set('x-robots-tag', 'noindex, nofollow');
+  if ((headers.get('content-type') ?? '').includes('text/html')) {
+    headers.set('content-security-policy', HTML_CSP);
+  }
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
 
 export default {
-  async fetch(request: Request, _env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
 
-    if (method === 'POST' && path === '/api/publish') {
-      return withBaseHeaders(notImplemented('publish'));
-    }
-
-    const workMatch = path.match(/^\/api\/works\/([^/]{1,64})(\/(renew|report))?$/);
-    if (workMatch) {
-      const [, id, , action] = workMatch;
-      if (!WORK_ID_RE.test(id ?? '')) {
-        return withBaseHeaders(Response.json({ error: 'invalid work id' }, { status: 400 }));
-      }
-      if (action === 'renew' && method === 'POST') return withBaseHeaders(notImplemented('renew'));
-      if (action === 'report' && method === 'POST') return withBaseHeaders(notImplemented('report'));
-      if (!action && method === 'PUT') return withBaseHeaders(notImplemented('update'));
-      if (!action && method === 'DELETE') return withBaseHeaders(notImplemented('unpublish'));
-    }
-
-    const readMatch = path.match(/^\/w\/([^/]{1,64})(\/manage)?$/);
-    if (readMatch && method === 'GET') {
-      const [, id, manage] = readMatch;
-      if (!WORK_ID_RE.test(id ?? '')) {
-        return withBaseHeaders(new Response('Not Found', { status: 404 }));
-      }
-      return withBaseHeaders(notImplemented(manage ? 'manage page' : 'reading page'));
-    }
-
-    if (method === 'GET' && (path === '/' || path === '/rules')) {
-      return withBaseHeaders(notImplemented(path === '/' ? 'landing' : 'rules page'));
-    }
-
-    return withBaseHeaders(new Response('Not Found', { status: 404 }));
+    const res = await route(request, env, ctx, path, method);
+    const withHeaders = withBaseHeaders(res);
+    return path.startsWith('/api/') ? withCors(request, withHeaders) : withHeaders;
   },
 
-  async scheduled(_controller: ScheduledController, _env: Env): Promise<void> {
-    // Daily purge: DELETE FROM works WHERE expires_at < now AND listed = 0,
-    // plus the matching works/{id}/* objects in R2. Implemented in Phase 1.
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(purgeExpired(env));
   },
 } satisfies ExportedHandler<Env>;
 
-export { PUBLISH_ALLOWED_ORIGIN };
+async function route(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  path: string,
+  method: string,
+): Promise<Response> {
+  if (path === '/api/publish') {
+    if (method === 'OPTIONS') return preflightResponse(request);
+    if (method === 'POST') return await handlePublish(request, env);
+    return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+  }
+
+  const workMatch = path.match(/^\/api\/works\/([^/]{1,64})(\/(renew|report))?$/);
+  if (workMatch) {
+    const [, id, , action] = workMatch;
+    if (method === 'OPTIONS') return preflightResponse(request);
+    if (!WORK_ID_RE.test(id ?? '')) {
+      // Same shape as an auth miss — invalid ids are not distinguishable.
+      return Response.json({ error: 'not_found' }, { status: 404 });
+    }
+    const workId = id ?? '';
+    if (action === 'report' && method === 'POST') return await handleReport(request, env, workId);
+    if (action === 'renew' && method === 'POST') return await handleManage(request, env, workId, 'renew');
+    if (!action && method === 'GET') return await handleManage(request, env, workId, 'meta');
+    if (!action && method === 'PUT') return await handleManage(request, env, workId, 'update');
+    if (!action && method === 'DELETE') return await handleManage(request, env, workId, 'unpublish');
+    return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+  }
+
+  const readMatch = path.match(/^\/w\/([^/]{1,64})(\/manage)?$/);
+  if (readMatch && method === 'GET') {
+    const [, id, manage] = readMatch;
+    if (!WORK_ID_RE.test(id ?? '')) return notFoundPage();
+    const workId = id ?? '';
+    return manage ? managePage(workId) : await handleRead(request, env, ctx, workId);
+  }
+
+  if (method === 'GET' && path === '/') return landingPage();
+  if (method === 'GET' && path === '/rules') return rulesPage();
+
+  return notFoundPage();
+}
+
+/** Daily cron: evaporate unlisted works past their expiry, in batches. */
+const PURGE_BATCH = 500;
+
+async function purgeExpired(env: Env): Promise<void> {
+  const nowIso = new Date().toISOString();
+  for (;;) {
+    const ids = await listExpired(env.SHELF_DB, nowIso, PURGE_BATCH);
+    for (const id of ids) {
+      await env.SHELF_R2.delete([bundleKey(id), pageKey(id)]);
+      await deleteWork(env.SHELF_DB, id);
+    }
+    if (ids.length < PURGE_BATCH) break;
+  }
+}
