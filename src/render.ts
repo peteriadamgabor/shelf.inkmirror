@@ -194,28 +194,10 @@ function warningChips(warnings: WarningTag[]): string {
     .join('');
 }
 
-function reportForm(workId: string): string {
-  // Plain HTML form POST — works without fetch. The hidden `ts` field is set
-  // by inline JS (min-render-time gate); `website` is the honeypot.
-  return `<details class="report">
-<summary>Report this work</summary>
-<form method="post" action="/api/works/${workId}/report" class="report-form">
-<label>Reason
-<select name="reason" required>
-<option value="mislabeled">Mislabeled (rating or warnings are dishonest)</option>
-<option value="hard-line">Hard-line content (minors / doxxing / illegal)</option>
-<option value="plagiarism">Plagiarism</option>
-<option value="other">Other</option>
-</select>
-</label>
-<label>Details (optional)
-<textarea name="message" maxlength="1000" rows="4"></textarea>
-</label>
-<input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
-<input type="hidden" name="ts" id="report-ts" value="">
-<button type="submit" class="btn">Send report</button>
-</form>
-</details>`;
+function reportLink(workId: string): string {
+  // The form itself lives on the live Worker page /w/:id/report so it can
+  // evolve (fields, optional Turnstile) without re-baking published pages.
+  return `<p class="report"><a href="/w/${escapeHtml(workId)}/report" rel="nofollow">Report this work</a></p>`;
 }
 
 function ageGate(bundle: PublishBundleV1): string {
@@ -245,8 +227,6 @@ if(yes)yes.addEventListener('click',function(){try{localStorage.setItem(KEY,'1')
 var back=document.getElementById('age-back');
 if(back)back.addEventListener('click',function(e){e.preventDefault();history.back();});
 })();`;
-
-const REPORT_TS_JS = `(function(){var f=document.getElementById('report-ts');if(f)f.value=String(Date.now());})();`;
 
 // ---------- page CSS (prose layer on top of THEME_CSS) ----------
 
@@ -302,20 +282,12 @@ main{max-width:42rem;margin:0 auto;padding:0 1.25rem 4rem}
 .work-foot a{color:var(--violet)}
 .nums{font-variant-numeric:tabular-nums}
 .report{margin:1rem 0}
-.report summary{cursor:pointer}
-.report-form{display:grid;gap:.7rem;margin:.8rem 0 0;max-width:24rem}
-.report-form label{display:grid;gap:.25rem;font-size:.85rem}
-.report-form select,.report-form textarea{
-  font:inherit;color:var(--ink);background:var(--surface);
-  border:1px solid var(--line);border-radius:8px;padding:.45rem .6rem;
-}
 .btn{
   display:inline-block;appearance:none;cursor:pointer;justify-self:start;
   font:600 .85rem/1 var(--sans);padding:.6rem 1rem;border-radius:10px;
   border:1px solid var(--line);background:var(--surface);color:var(--ink);
 }
 .btn-primary{background:var(--violet);border-color:var(--violet);color:#fff}
-.hp{position:absolute!important;left:-9999px!important;width:1px;height:1px;opacity:0;pointer-events:none}
 .gate{min-height:100vh;display:grid;place-items:center;padding:1.5rem}
 .gate-card{
   background:var(--surface);border:1px solid var(--line);border-radius:16px;
@@ -371,7 +343,7 @@ ${synopsis}
 
   const footer = `<footer class="work-foot">
 <p>${escapeHtml(bundle.pen_name)} · <span class="nums">${countWords(bundle).toLocaleString('en-US')}</span> words</p>
-${reportForm(meta.id)}
+${reportLink(meta.id)}
 <p><a href="https://inkmirror.cc" rel="noopener">Written with InkMirror</a></p>
 </footer>`;
 
@@ -382,7 +354,7 @@ ${chapterHtml}
 ${footer}
 </main>`;
 
-  const scripts = [REPORT_TS_JS, ...(gated ? [AGE_GATE_JS] : [])];
+  const script = gated ? `<script>${AGE_GATE_JS}</script>\n` : '';
 
   return `<!doctype html>
 <html lang="${escapeHtml(bundle.language)}">
@@ -397,7 +369,6 @@ ${footer}
 <body>
 ${gated ? ageGate(bundle) : ''}
 ${main}
-<script>${scripts.join('\n')}</script>
-</body>
+${script}</body>
 </html>`;
 }

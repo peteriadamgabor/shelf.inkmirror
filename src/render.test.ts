@@ -245,7 +245,7 @@ describe('renderWorkPage — chapter kinds', () => {
 });
 
 describe('renderWorkPage — chrome', () => {
-  it('carries noindex, lang, rating badge, warnings, and the report form', () => {
+  it('carries noindex, lang, rating badge, warnings, and the report link', () => {
     const html = renderWorkPage(
       bundle({ language: 'hu', rating: 'mature', warnings: ['graphic-violence', 'self-harm'] }),
       META,
@@ -255,9 +255,11 @@ describe('renderWorkPage — chrome', () => {
     expect(html).toContain('badge-mature');
     expect(html).toContain('Graphic violence');
     expect(html).toContain('Self-harm / suicide');
-    expect(html).toContain(`action="/api/works/${META.id}/report"`);
-    expect(html).toContain('name="website"'); // honeypot
-    expect(html).toContain('id="report-ts"'); // min-render-time gate
+    // The report form moved to the live /w/:id/report page (Phase 1.5) —
+    // baked pages only link there, so the form can evolve without re-baking.
+    expect(html).toContain(`href="/w/${META.id}/report"`);
+    expect(html).toContain('Report this work');
+    expect(html).not.toContain('<form');
     expect(html).toContain('prefers-reduced-motion');
   });
 });
