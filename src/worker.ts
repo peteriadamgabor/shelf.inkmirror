@@ -105,7 +105,7 @@ async function route(
 ): Promise<Response> {
   if (path === '/api/publish') {
     if (method === 'OPTIONS') return preflightResponse(request);
-    if (method === 'POST') return await handlePublish(request, env);
+    if (method === 'POST') return await handlePublish(request, env, ctx);
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
 
@@ -123,7 +123,7 @@ async function route(
       return Response.json({ error: 'not_found' }, { status: 404 });
     }
     if (method === 'DELETE') {
-      return await handleManage(request, env, id ?? '', 'letter-delete', letterId ?? '');
+      return await handleManage(request, env, ctx, id ?? '', 'letter-delete', letterId ?? '');
     }
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
@@ -138,14 +138,14 @@ async function route(
     }
     const workId = id ?? '';
     if (action === 'report' && method === 'POST') return await handleReport(request, env, workId);
-    if (action === 'renew' && method === 'POST') return await handleManage(request, env, workId, 'renew');
-    if (action === 'password' && method === 'PUT') return await handleManage(request, env, workId, 'password');
+    if (action === 'renew' && method === 'POST') return await handleManage(request, env, ctx, workId, 'renew');
+    if (action === 'password' && method === 'PUT') return await handleManage(request, env, ctx, workId, 'password');
     if (action === 'letters' && method === 'POST') return await handleLetterSubmit(request, env, workId);
-    if (action === 'letters' && method === 'GET') return await handleManage(request, env, workId, 'letters');
-    if (action === 'letters-open' && method === 'PUT') return await handleManage(request, env, workId, 'letters-open');
-    if (!action && method === 'GET') return await handleManage(request, env, workId, 'meta');
-    if (!action && method === 'PUT') return await handleManage(request, env, workId, 'update');
-    if (!action && method === 'DELETE') return await handleManage(request, env, workId, 'unpublish');
+    if (action === 'letters' && method === 'GET') return await handleManage(request, env, ctx, workId, 'letters');
+    if (action === 'letters-open' && method === 'PUT') return await handleManage(request, env, ctx, workId, 'letters-open');
+    if (!action && method === 'GET') return await handleManage(request, env, ctx, workId, 'meta');
+    if (!action && method === 'PUT') return await handleManage(request, env, ctx, workId, 'update');
+    if (!action && method === 'DELETE') return await handleManage(request, env, ctx, workId, 'unpublish');
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
 

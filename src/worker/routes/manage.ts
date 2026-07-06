@@ -26,6 +26,7 @@ import {
   updateWork,
   type WorkRow,
 } from '../lib/db';
+import { scheduleModeration } from '../lib/moderation';
 import {
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
@@ -90,6 +91,7 @@ export type ManageAction =
 export async function handleManage(
   request: Request,
   env: Env,
+  ctx: ExecutionContext,
   id: string,
   action: ManageAction,
   letterId?: string,
@@ -104,7 +106,7 @@ export async function handleManage(
     case 'meta':
       return metaJson(row);
     case 'update':
-      return await update(request, env, row);
+      return await update(request, env, ctx, row);
     case 'unpublish':
       return await unpublish(env, id);
     case 'renew': {
@@ -176,7 +178,12 @@ async function lettersOpen(request: Request, env: Env, row: WorkRow): Promise<Re
   return Response.json({ ok: true, lettersOpen: open });
 }
 
-async function update(request: Request, env: Env, row: WorkRow): Promise<Response> {
+async function update(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  row: WorkRow,
+): Promise<Response> {
   const text = await readBodyCapped(request, MAX_PUBLISH_BODY_BYTES);
   if (text === null) return jsonError(413, 'too_large');
 
@@ -209,6 +216,10 @@ async function update(request: Request, env: Env, row: WorkRow): Promise<Respons
     first_line: firstLine(parsed),
     updated_at: updatedAt,
   });
+
+  // Updates re-run the shadow chain the same as first publishes — the new
+  // text is already baked; the chain only observes. No-op without the key.
+  scheduleModeration(ctx, env, parsed, row.id);
 
   return Response.json({ ok: true, id: row.id, url: workUrl(row.id), updated_at: updatedAt });
 }

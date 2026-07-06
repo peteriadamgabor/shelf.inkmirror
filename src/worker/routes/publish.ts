@@ -14,6 +14,7 @@ import { randomBase64Url, sha256Hex } from '../lib/crypto';
 import { contentHash } from '../lib/content-hash';
 import { bakeWork } from '../lib/bake';
 import { getSetting, hasTombstone, insertWork } from '../lib/db';
+import { scheduleModeration } from '../lib/moderation';
 import { MAX_PUBLISH_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
 
 export const WORK_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -46,7 +47,11 @@ export async function publishGates(env: Env, bundle: PublishBundleV1): Promise<R
   return null;
 }
 
-export async function handlePublish(request: Request, env: Env): Promise<Response> {
+export async function handlePublish(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const rl = await env.RL_PUBLISH.limit({ key: clientIp(request) });
   if (!rl.success) return jsonError(429, 'rate_limited');
 
@@ -93,6 +98,10 @@ export async function handlePublish(request: Request, env: Env): Promise<Respons
     updated_at: nowIso,
     expires_at: expiresAt,
   });
+
+  // Phase 2 shadow chain: content is already stored and baked — the chain
+  // only observes in the background. No-op without ANTHROPIC_API_KEY.
+  scheduleModeration(ctx, env, parsed, id);
 
   return Response.json({ id, url: workUrl(id), manageSecret }, { status: 200 });
 }
