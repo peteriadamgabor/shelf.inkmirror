@@ -2,11 +2,18 @@
  * Baked reading-page renderer. Called once at publish/update time; the
  * output HTML is stored in R2 and served as-is (D4 in the design spec).
  *
+ * Single-chapter works bake to one page (works/{id}/index.html) exactly as
+ * before. Multi-chapter works bake N+1 pages: a cover (title, labels,
+ * synopsis, front-matter prose, "Continue reading" slot, TOC) plus one page
+ * per body chapter (standard + back matter, reading order) at
+ * works/{id}/ch/{n}.html.
+ *
  * Security posture: every user-controlled string is escaped at the point of
  * interpolation. Character colors are validated against a strict hex regex
  * before they may enter a style attribute — anything else falls back to the
- * teal accent token. The page carries noindex/nofollow and (for mature/
- * explicit ratings) a localStorage-backed age gate.
+ * teal accent token. Every page carries noindex/nofollow and (for mature/
+ * explicit ratings) a localStorage-backed age gate — chapter pages too,
+ * because deep links must gate.
  */
 
 import type {
@@ -299,11 +306,36 @@ main{max-width:42rem;margin:0 auto;padding:0 1.25rem 4rem}
 .gate-by{color:var(--muted);font-size:.9rem;margin:0 0 1rem}
 .gate-copy{font-size:.95rem;margin:1rem 0 1.2rem}
 .gate-noscript{font-size:.85rem;color:var(--muted)}
+.continue{margin:2.4rem 0 0;text-align:center}
+.toc{margin:2.6rem 0 0}
+.toc-heading{font-family:var(--sans);font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);text-align:center;margin:0 0 .6rem}
+.toc-list{list-style:none;margin:0;padding:0}
+.toc-list a{
+  display:flex;align-items:baseline;gap:.8rem;padding:.7rem .15rem;
+  text-decoration:none;color:var(--ink);border-bottom:1px solid var(--line);
+  font-family:var(--serif);font-size:1.05rem;
+}
+.toc-list a:hover .toc-label{color:var(--violet)}
+.toc-num{color:var(--muted);font-family:var(--sans);font-size:.8rem;min-width:1.6rem;text-align:right}
+.toc-label{flex:1;min-width:0}
+.toc-words{color:var(--muted);font-family:var(--sans);font-size:.8rem;white-space:nowrap}
+.ch-head{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;padding:1.4rem 0 .9rem;border-bottom:1px solid var(--line)}
+.ch-back{font-family:var(--sans);font-size:.9rem;font-weight:600;text-decoration:none;color:var(--ink)}
+.ch-back:hover{color:var(--violet)}
+.ch-count{font-family:var(--sans);font-size:.85rem;color:var(--muted)}
+.ch-nav{display:flex;justify-content:space-between;gap:1rem;font-family:var(--sans);font-size:.9rem}
+.ch-nav a{text-decoration:none;color:var(--violet)}
+.ch-nav-top{margin:.9rem 0 0}
+.ch-nav-bottom{border-top:1px solid var(--line);margin-top:3rem;padding-top:1.2rem}
 `;
 
-// ---------- the page ----------
+// ---------- shared page pieces ----------
 
-export function renderWorkPage(bundle: PublishBundleV1, meta: { id: string }): string {
+interface PageMeta {
+  id: string;
+}
+
+function prepareBlocks(bundle: PublishBundleV1): { ctx: RenderCtx; blocksByChapter: Map<string, PublishedBlock[]> } {
   const characters = new Map(bundle.characters.map((c) => [c.id, { name: c.name, color: c.color }]));
   const ctx: RenderCtx = { characters, povCharacterId: bundle.document.pov_character_id };
 
@@ -314,47 +346,53 @@ export function renderWorkPage(bundle: PublishBundleV1, meta: { id: string }): s
     else blocksByChapter.set(b.chapter_id, [b]);
   }
   for (const list of blocksByChapter.values()) list.sort((a, b) => a.order - b.order);
+  return { ctx, blocksByChapter };
+}
 
-  const chapterHtml = orderChapters(bundle.chapters)
-    .map((ch) => {
-      const blocks = blocksByChapter.get(ch.id) ?? [];
-      const centered = FRONT_MATTER.has(ch.kind);
-      const title = showsTitle(ch) && ch.title.trim().length > 0
-        ? `<h2 class="ch-title">${escapeHtml(ch.title)}</h2>`
-        : '';
-      const body = blocks.map((b) => renderBlock(b, ctx)).join('\n');
-      const classes = ['chapter', `ch-${ch.kind}`, centered ? 'ch-center' : '']
-        .filter((c) => c.length > 0)
-        .join(' ');
-      return `<section class="${classes}">${title}\n${body}</section>`;
-    })
-    .join('\n');
+function chapterSection(ch: PublishedChapter, blocks: PublishedBlock[], ctx: RenderCtx): string {
+  const centered = FRONT_MATTER.has(ch.kind);
+  const title = showsTitle(ch) && ch.title.trim().length > 0
+    ? `<h2 class="ch-title">${escapeHtml(ch.title)}</h2>`
+    : '';
+  const body = blocks.map((b) => renderBlock(b, ctx)).join('\n');
+  const classes = ['chapter', `ch-${ch.kind}`, centered ? 'ch-center' : '']
+    .filter((c) => c.length > 0)
+    .join(' ');
+  return `<section class="${classes}">${title}\n${body}</section>`;
+}
 
+function workHeader(bundle: PublishBundleV1): string {
   const synopsis = bundle.document.synopsis.trim().length > 0
     ? `<p class="synopsis">${escapeHtml(bundle.document.synopsis.trim())}</p>`
     : '';
-
-  const header = `<header class="work-head">
+  return `<header class="work-head">
 <h1 class="work-title">${escapeHtml(bundle.title)}</h1>
 <p class="byline">by ${escapeHtml(bundle.pen_name)}</p>
 <div class="labels">${ratingBadge(bundle.rating)}${warningChips(bundle.warnings)}</div>
 ${synopsis}
 </header>`;
+}
 
-  const footer = `<footer class="work-foot">
+function workFooter(bundle: PublishBundleV1, meta: PageMeta): string {
+  return `<footer class="work-foot">
 <p>${escapeHtml(bundle.pen_name)} · <span class="nums">${countWords(bundle).toLocaleString('en-US')}</span> words</p>
 ${reportLink(meta.id)}
 <p><a href="https://inkmirror.cc" rel="noopener">Written with InkMirror</a></p>
 </footer>`;
+}
 
+/** Wrap page body in the full HTML document, with the age gate when rated. */
+function bakedPage(
+  bundle: PublishBundleV1,
+  opts: { docTitle: string; body: string; script?: string },
+): string {
   const gated = bundle.rating !== 'general';
   const main = `<main id="work"${gated ? ' hidden' : ''}>
-${header}
-${chapterHtml}
-${footer}
+${opts.body}
 </main>`;
 
-  const script = gated ? `<script>${AGE_GATE_JS}</script>\n` : '';
+  const js = `${gated ? AGE_GATE_JS : ''}${opts.script ?? ''}`;
+  const script = js.length > 0 ? `<script>${js}</script>\n` : '';
 
   return `<!doctype html>
 <html lang="${escapeHtml(bundle.language)}">
@@ -363,7 +401,7 @@ ${footer}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <meta name="color-scheme" content="light dark">
-<title>${escapeHtml(bundle.title)} — ${escapeHtml(bundle.pen_name)}</title>
+<title>${escapeHtml(opts.docTitle)}</title>
 <style>${THEME_CSS}${READING_CSS}</style>
 </head>
 <body>
@@ -371,4 +409,176 @@ ${gated ? ageGate(bundle) : ''}
 ${main}
 ${script}</body>
 </html>`;
+}
+
+// ---------- chaptered reading ----------
+
+/** Word count for one chapter's published prose (TOC entries). */
+function chapterWordCount(blocks: PublishedBlock[]): number {
+  let n = 0;
+  for (const b of blocks) {
+    const t = b.content.trim();
+    if (t.length === 0) continue;
+    n += t.split(/\s+/).length;
+  }
+  return n;
+}
+
+/** TOC / continue-slot label: the title, or "Chapter N" when hidden/empty. */
+function chapterLabel(ch: PublishedChapter, n: number): string {
+  return showsTitle(ch) && ch.title.trim().length > 0 ? ch.title.trim() : `Chapter ${n}`;
+}
+
+/** Serialize a value into inline JS, safe against </script> breakout. */
+function jsValue(v: unknown): string {
+  return JSON.stringify(v).replace(/</g, '\\u003c');
+}
+
+function coverPage(
+  bundle: PublishBundleV1,
+  meta: PageMeta,
+  front: PublishedChapter[],
+  body: PublishedChapter[],
+  labels: string[],
+  ctx: RenderCtx,
+  blocksByChapter: Map<string, PublishedBlock[]>,
+): string {
+  const id = escapeHtml(meta.id);
+  const frontHtml = front
+    .map((ch) => chapterSection(ch, blocksByChapter.get(ch.id) ?? [], ctx))
+    .join('\n');
+
+  // Hidden until inline JS finds a stored position — and therefore also
+  // hidden under noscript, by construction.
+  const continueSlot = body.length > 0
+    ? `<div class="continue" id="continue" hidden>
+<a id="continue-link" class="btn btn-primary" href="/w/${id}/1">Continue reading</a>
+</div>`
+    : '';
+
+  const tocEntries = body
+    .map((ch, i) => {
+      const n = i + 1;
+      const words = chapterWordCount(blocksByChapter.get(ch.id) ?? []);
+      return `<li><a href="/w/${id}/${n}"><span class="toc-num nums">${n}</span><span class="toc-label">${escapeHtml(labels[i] ?? `Chapter ${n}`)}</span><span class="toc-words nums">${words.toLocaleString('en-US')} words</span></a></li>`;
+    })
+    .join('\n');
+  const toc = body.length > 0
+    ? `<nav class="toc" id="toc" aria-label="Contents">
+<h2 class="toc-heading">Contents</h2>
+<ol class="toc-list">
+${tocEntries}
+</ol>
+</nav>`
+    : '';
+
+  const script = body.length > 0
+    ? `(function(){
+var el=document.getElementById('continue'),ln=document.getElementById('continue-link');
+if(!el||!ln)return;
+var id=${jsValue(meta.id)},labels=${jsValue(labels)};
+var n=0;try{n=parseInt(localStorage.getItem('shelf.pos.'+id)||'',10);}catch(e){return;}
+if(!n||n<1||n>labels.length)return;
+ln.href='/w/'+id+'/'+n;
+ln.textContent='Continue — '+labels[n-1];
+el.hidden=false;
+})();`
+    : '';
+
+  const pageBody = `${workHeader(bundle)}
+${frontHtml}
+${continueSlot}
+${toc}
+${workFooter(bundle, meta)}`;
+
+  return bakedPage(bundle, {
+    docTitle: `${bundle.title} — ${bundle.pen_name}`,
+    body: pageBody,
+    script,
+  });
+}
+
+function chapterPage(
+  bundle: PublishBundleV1,
+  meta: PageMeta,
+  ch: PublishedChapter,
+  n: number,
+  total: number,
+  ctx: RenderCtx,
+  blocksByChapter: Map<string, PublishedBlock[]>,
+): string {
+  const id = escapeHtml(meta.id);
+  const section = chapterSection(ch, blocksByChapter.get(ch.id) ?? [], ctx);
+
+  const prev = n === 1
+    ? `<a href="/w/${id}" rel="prev">&larr; Cover</a>`
+    : `<a href="/w/${id}/${n - 1}" rel="prev">&larr; Previous</a>`;
+  const next = n === total
+    ? `<a href="/w/${id}#toc">Contents</a>`
+    : `<a href="/w/${id}/${n + 1}" rel="next">Next &rarr;</a>`;
+  const nav = (cls: string): string =>
+    `<nav class="ch-nav ${cls}" aria-label="Chapter navigation">${prev}${next}</nav>`;
+
+  const head = `<header class="ch-head">
+<a class="ch-back" href="/w/${id}">${escapeHtml(bundle.title)}</a>
+<span class="ch-count nums">${n} / ${total}</span>
+</header>`;
+
+  const pageBody = `${head}
+${nav('ch-nav-top')}
+${section}
+${nav('ch-nav-bottom')}
+${workFooter(bundle, meta)}`;
+
+  // Remember the reading position for the cover's "Continue reading" slot.
+  const script = `(function(){try{localStorage.setItem('shelf.pos.'+${jsValue(meta.id)},String(${n}));}catch(e){}})();`;
+
+  return bakedPage(bundle, {
+    docTitle: `${bundle.title} · ${n} / ${total} — ${bundle.pen_name}`,
+    body: pageBody,
+    script,
+  });
+}
+
+// ---------- the pages ----------
+
+export interface BakedPages {
+  /** works/{id}/index.html — the whole work (single-chapter) or the cover. */
+  index: string;
+  /** works/{id}/ch/{n}.html for n = index+1 — body chapters in reading order. */
+  chapters: string[];
+}
+
+/**
+ * Render every baked page for a work. A single-chapter work (exactly one
+ * chapter after ordering, regardless of kind) keeps the one-page form; a
+ * multi-chapter work gets a cover plus one page per standard/back-matter
+ * chapter, with front matter rendered on the cover.
+ */
+export function renderWorkPages(bundle: PublishBundleV1, meta: PageMeta): BakedPages {
+  const { ctx, blocksByChapter } = prepareBlocks(bundle);
+  const ordered = orderChapters(bundle.chapters);
+
+  if (ordered.length === 1) {
+    const chapterHtml = ordered
+      .map((ch) => chapterSection(ch, blocksByChapter.get(ch.id) ?? [], ctx))
+      .join('\n');
+    const pageBody = `${workHeader(bundle)}
+${chapterHtml}
+${workFooter(bundle, meta)}`;
+    const index = bakedPage(bundle, {
+      docTitle: `${bundle.title} — ${bundle.pen_name}`,
+      body: pageBody,
+    });
+    return { index, chapters: [] };
+  }
+
+  const front = ordered.filter((ch) => FRONT_MATTER.has(ch.kind));
+  const body = ordered.filter((ch) => !FRONT_MATTER.has(ch.kind));
+  const labels = body.map((ch, i) => chapterLabel(ch, i + 1));
+
+  return {
+    index: coverPage(bundle, meta, front, body, labels, ctx, blocksByChapter),
+    chapters: body.map((ch, i) => chapterPage(bundle, meta, ch, i + 1, body.length, ctx, blocksByChapter)),
+  };
 }

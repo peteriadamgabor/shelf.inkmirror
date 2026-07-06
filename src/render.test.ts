@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { PUBLISH_BUNDLE_KIND, PUBLISH_BUNDLE_VERSION, type PublishBundleV1, type PublishedBlock, type PublishedChapter } from './format';
-import { countWords, firstLine, renderMarkedContent, renderWorkPage } from './render';
+import { countWords, firstLine, renderMarkedContent, renderWorkPages } from './render';
+
+/** Single-page view: the index page (single-chapter bundles bake only this). */
+function renderWorkPage(b: PublishBundleV1, meta: { id: string }): string {
+  return renderWorkPages(b, meta).index;
+}
 
 function bundle(overrides: Partial<PublishBundleV1> = {}): PublishBundleV1 {
   return {
@@ -207,8 +212,8 @@ describe('renderWorkPage — dialogue', () => {
   });
 });
 
-describe('renderWorkPage — chapter kinds', () => {
-  it('orders front matter before standard before back matter regardless of order fields', () => {
+describe('renderWorkPages — chapter kinds', () => {
+  it('front matter renders on the cover; standard then back matter get the chapter pages', () => {
     const chapters: PublishedChapter[] = [
       { id: 'aft', title: 'Afterword', order: 0, kind: 'afterword' },
       { id: 'std', title: 'Chapter One', order: 1, kind: 'standard' },
@@ -219,13 +224,15 @@ describe('renderWorkPage — chapter kinds', () => {
       { id: 'b2', chapter_id: 'std', type: 'text', content: 'MIDDLEMARKER', order: 0, metadata: { type: 'text' } },
       { id: 'b3', chapter_id: 'epi', type: 'text', content: 'FRONTMARKER', order: 0, metadata: { type: 'text' } },
     ];
-    const html = renderWorkPage(bundle({ chapters, blocks }), META);
-    const front = html.indexOf('FRONTMARKER');
-    const middle = html.indexOf('MIDDLEMARKER');
-    const back = html.indexOf('BACKMARKER');
-    expect(front).toBeGreaterThan(-1);
-    expect(front).toBeLessThan(middle);
-    expect(middle).toBeLessThan(back);
+    const pages = renderWorkPages(bundle({ chapters, blocks }), META);
+    // Front matter lives on the cover — chapter prose does not.
+    expect(pages.index).toContain('FRONTMARKER');
+    expect(pages.index).not.toContain('MIDDLEMARKER');
+    expect(pages.index).not.toContain('BACKMARKER');
+    // Reading order: standard first, back matter after.
+    expect(pages.chapters).toHaveLength(2);
+    expect(pages.chapters[0]).toContain('MIDDLEMARKER');
+    expect(pages.chapters[1]).toContain('BACKMARKER');
   });
 
   it('front-matter kinds hide the title by default and center content; standard prints it', () => {
@@ -235,12 +242,124 @@ describe('renderWorkPage — chapter kinds', () => {
       { id: 'ded', title: 'DedicationTitle', order: 2, kind: 'dedication', export_title: true },
       { id: 'aft', title: 'AfterwordTitle', order: 3, kind: 'afterword', export_title: false },
     ];
-    const html = renderWorkPage(bundle({ chapters, blocks: [] }), META);
-    expect(html).not.toContain('EpigraphTitle');
-    expect(html).toContain('StandardTitle');
-    expect(html).toContain('DedicationTitle'); // export_title === true overrides the default
-    expect(html).not.toContain('AfterwordTitle'); // export_title === false overrides the default
-    expect(html).toContain('ch-epigraph ch-center');
+    const pages = renderWorkPages(bundle({ chapters, blocks: [] }), META);
+    expect(pages.index).not.toContain('EpigraphTitle');
+    expect(pages.index).toContain('DedicationTitle'); // export_title === true overrides the default
+    expect(pages.index).toContain('ch-epigraph ch-center');
+    expect(pages.chapters[0]).toContain('StandardTitle');
+    // export_title === false hides the heading; the TOC falls back to "Chapter 2".
+    expect(pages.chapters[1]).not.toContain('AfterwordTitle');
+    expect(pages.index).not.toContain('AfterwordTitle');
+    expect(pages.index).toContain('Chapter 2');
+  });
+});
+
+describe('renderWorkPages — chaptered reading', () => {
+  function threeChapterBundle(overrides: Partial<PublishBundleV1> = {}): PublishBundleV1 {
+    const chapters: PublishedChapter[] = [
+      { id: 'ded', title: 'For Ilka', order: 0, kind: 'dedication' },
+      { id: 'c1', title: 'The Door', order: 1, kind: 'standard' },
+      { id: 'c2', title: 'The Hallway', order: 2, kind: 'standard' },
+      { id: 'c3', title: 'The Mirror', order: 3, kind: 'standard' },
+    ];
+    const blocks: PublishedBlock[] = [
+      { id: 'd1', chapter_id: 'ded', type: 'text', content: 'DEDICATION PROSE', order: 0, metadata: { type: 'text' } },
+      { id: 'b1', chapter_id: 'c1', type: 'text', content: 'one two three four', order: 0, metadata: { type: 'text' } },
+      { id: 'b2', chapter_id: 'c2', type: 'text', content: 'five six', order: 0, metadata: { type: 'text' } },
+      { id: 'b3', chapter_id: 'c3', type: 'text', content: 'seven', order: 0, metadata: { type: 'text' } },
+    ];
+    return bundle({ chapters, blocks, ...overrides });
+  }
+
+  it('single-chapter works keep the one-page form: no TOC, no continue slot, no chapter pages', () => {
+    const pages = renderWorkPages(bundle(), META);
+    expect(pages.chapters).toHaveLength(0);
+    expect(pages.index).not.toContain('class="toc"');
+    expect(pages.index).not.toContain('Continue reading');
+    expect(pages.index).toContain('Two hearts, one soul.');
+    expect(pages.index).toContain('Report this work');
+  });
+
+  it('a single non-standard chapter also stays single-page', () => {
+    const pages = renderWorkPages(
+      bundle({ chapters: [{ id: 'ch1', title: 'One', order: 0, kind: 'epigraph' }] }),
+      META,
+    );
+    expect(pages.chapters).toHaveLength(0);
+    expect(pages.index).not.toContain('class="toc"');
+    expect(pages.index).toContain('Two hearts, one soul.');
+  });
+
+  it('multi-chapter: cover carries front-matter prose, TOC with word counts, hidden continue slot', () => {
+    const pages = renderWorkPages(threeChapterBundle(), META);
+    expect(pages.chapters).toHaveLength(3);
+
+    const cover = pages.index;
+    expect(cover).toContain('DEDICATION PROSE'); // front matter on the cover
+    expect(cover).not.toContain('one two three four'); // chapter prose is not
+    expect(cover).toContain(`href="/w/${META.id}/1"`);
+    expect(cover).toContain(`href="/w/${META.id}/3"`);
+    expect(cover).toContain('The Door');
+    expect(cover).toContain('The Mirror');
+    expect(cover).toContain('<span class="toc-words nums">4 words</span>');
+    expect(cover).toContain('<span class="toc-words nums">2 words</span>');
+    // Continue slot: hidden until inline JS finds a position (noscript-safe).
+    expect(cover).toContain('id="continue" hidden');
+    expect(cover).toContain(`shelf.pos.`);
+    expect(cover).toContain('Continue reading');
+  });
+
+  it('chapter page 2: slim header, prev /1, next /3, position stamp, full-work footer', () => {
+    const bundle3 = threeChapterBundle({ document: { synopsis: '', pov_character_id: null } });
+    const pages = renderWorkPages(bundle3, META);
+    const page2 = pages.chapters[1] ?? '';
+    expect(page2).toContain(`<a class="ch-back" href="/w/${META.id}">A Quiet Book</a>`);
+    expect(page2).toContain('<span class="ch-count nums">2 / 3</span>');
+    expect(page2).toContain(`href="/w/${META.id}/1" rel="prev"`);
+    expect(page2).toContain(`href="/w/${META.id}/3" rel="next"`);
+    expect(page2).toContain('five six');
+    expect(page2).toContain(`localStorage.setItem('shelf.pos.'+"${META.id}",String(2))`);
+    // Footer identical in shape to the cover's: whole-work word count + report link.
+    expect(page2).toContain(`href="/w/${META.id}/report"`);
+    expect(page2).toContain('<span class="nums">9</span> words'); // whole work incl. front matter
+    // Two navs: compact top + bottom.
+    expect(page2.match(/class="ch-nav /g)).toHaveLength(2);
+  });
+
+  it('first page prevs to the cover; last page shows Contents and no next', () => {
+    const pages = renderWorkPages(threeChapterBundle(), META);
+    const page1 = pages.chapters[0] ?? '';
+    const page3 = pages.chapters[2] ?? '';
+    expect(page1).toContain(`href="/w/${META.id}" rel="prev"`);
+    expect(page3).toContain(`href="/w/${META.id}#toc">Contents</a>`);
+    expect(page3).not.toContain('rel="next"');
+    expect(page3).toContain(`localStorage.setItem('shelf.pos.'+"${META.id}",String(3))`);
+  });
+
+  it('explicit rating gates the cover AND every chapter page', () => {
+    const pages = renderWorkPages(threeChapterBundle({ rating: 'explicit' }), META);
+    expect(pages.index).toContain('id="age-gate"');
+    expect(pages.index).toContain('<main id="work" hidden>');
+    for (const page of pages.chapters) {
+      expect(page).toContain('id="age-gate"');
+      expect(page).toContain('<main id="work" hidden>');
+      expect(page).toContain('shelf.age.ok');
+    }
+  });
+
+  it('a multi-chapter work of only front matter bakes a cover with no TOC and no chapter pages', () => {
+    const chapters: PublishedChapter[] = [
+      { id: 'cov', title: '', order: 0, kind: 'cover' },
+      { id: 'ded', title: '', order: 1, kind: 'dedication' },
+    ];
+    const blocks: PublishedBlock[] = [
+      { id: 'b1', chapter_id: 'cov', type: 'text', content: 'COVER PROSE', order: 0, metadata: { type: 'text' } },
+    ];
+    const pages = renderWorkPages(bundle({ chapters, blocks }), META);
+    expect(pages.chapters).toHaveLength(0);
+    expect(pages.index).toContain('COVER PROSE');
+    expect(pages.index).not.toContain('class="toc"');
+    expect(pages.index).not.toContain('Continue reading');
   });
 });
 
