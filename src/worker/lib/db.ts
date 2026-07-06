@@ -44,6 +44,14 @@ export interface WorkRow {
   listed_at: string | null;
   /** Author-facing gate outcome JSON (see parseListingVerdict). */
   listing_verdict: string | null;
+  /**
+   * The artifact the stored verdict reviewed: `${content_hash}|${rating}|
+   * ${normalized warnings}` (verdictFingerprint). The listing gate reuses a
+   * verdict only when this equals the current bundle+labels fingerprint —
+   * so changed content or changed labels can never ride a stale verdict onto
+   * the shelf. NULL = no reusable verdict.
+   */
+  verdict_fingerprint: string | null;
 }
 
 export interface NewWork {
@@ -64,12 +72,23 @@ export interface NewWork {
 
 export interface WorkUpdate {
   title: string;
+  pen_name: string;
+  language: string;
   rating: string;
   warnings: string[];
   word_count: number;
   first_line: string;
   content_hash: string;
   updated_at: string;
+  /**
+   * True when the content or labels actually changed. Then the stored
+   * moderation verdict no longer describes this artifact, so it is cleared,
+   * and any public listing is dropped in the SAME statement — a listed work
+   * cannot be silently mutated out from under the review that approved it
+   * (the central listing-integrity rule). False = idempotent re-push:
+   * verdict and listing stand.
+   */
+  resetModeration: boolean;
 }
 
 export async function getWork(db: D1Database, id: string): Promise<WorkRow | null> {
@@ -103,13 +122,31 @@ export async function insertWork(db: D1Database, w: NewWork): Promise<void> {
 }
 
 export async function updateWork(db: D1Database, id: string, u: WorkUpdate): Promise<void> {
+  // On a real change, atomically clear the now-stale verdict AND drop any
+  // listing — one statement so no window exists where a listed work serves
+  // changed content while still marked reviewed.
+  const resetClause = u.resetModeration
+    ? `, moderation_verdict = NULL, moderation_at = NULL, verdict_fingerprint = NULL,
+       listing_state = NULL, listed = 0, listed_at = NULL, listing_verdict = NULL`
+    : '';
   await db
     .prepare(
-      `UPDATE works SET title = ?1, rating = ?2, warnings = ?3,
-         word_count = ?4, first_line = ?5, content_hash = ?6, updated_at = ?7
-       WHERE id = ?8`,
+      `UPDATE works SET title = ?1, pen_name = ?2, language = ?3, rating = ?4, warnings = ?5,
+         word_count = ?6, first_line = ?7, content_hash = ?8, updated_at = ?9${resetClause}
+       WHERE id = ?10`,
     )
-    .bind(u.title, u.rating, JSON.stringify(u.warnings), u.word_count, u.first_line, u.content_hash, u.updated_at, id)
+    .bind(
+      u.title,
+      u.pen_name,
+      u.language,
+      u.rating,
+      JSON.stringify(u.warnings),
+      u.word_count,
+      u.first_line,
+      u.content_hash,
+      u.updated_at,
+      id,
+    )
     .run();
 }
 
@@ -135,18 +172,32 @@ export async function renewWork(db: D1Database, id: string, expiresAt: string): 
 }
 
 /**
- * Store the shadow-mode moderation verdict. Deliberately a plain UPDATE: a
- * work unpublished mid-run simply matches zero rows — silent, by design.
+ * Store a moderation verdict, bound to the exact content it reviewed.
+ *
+ * The `WHERE content_hash = reviewedHash` guard is load-bearing: a chain run
+ * is scheduled against a snapshot of the prose, but the author may update the
+ * work (new content_hash) before the run finishes. Without the guard a late
+ * verdict for superseded content would overwrite the row and could then be
+ * reused by the listing gate. With it, such a run silently matches zero rows.
+ * (An unpublished-mid-run work matches zero rows too — also by design.)
+ *
+ * `fingerprint` (verdictFingerprint of the reviewed bundle+labels) is stored
+ * alongside so the gate can prove the verdict belongs to the current artifact.
  */
 export async function setModerationVerdict(
   db: D1Database,
   id: string,
   verdictJson: string,
   atIso: string,
+  reviewedHash: string,
+  fingerprint: string,
 ): Promise<void> {
   await db
-    .prepare('UPDATE works SET moderation_verdict = ?1, moderation_at = ?2 WHERE id = ?3')
-    .bind(verdictJson, atIso, id)
+    .prepare(
+      `UPDATE works SET moderation_verdict = ?1, moderation_at = ?2, verdict_fingerprint = ?3
+       WHERE id = ?4 AND content_hash = ?5`,
+    )
+    .bind(verdictJson, atIso, fingerprint, id, reviewedHash)
     .run();
 }
 
@@ -507,13 +558,27 @@ export async function relabelWork(
   rating: string,
   warnings: string[],
   updatedAt: string,
+  delist: boolean,
 ): Promise<void> {
-  // content_hash = NULL stales the cached moderation verdict on purpose: the
-  // verdict was computed against the OLD declaration, and labels are one of
-  // its inputs. NULL = "unknown, run the chain" — so the accept-labels retry
-  // (and any later gate) re-judges instead of reusing a pre-relabel verdict.
+  // The stored verdict answered "is this honestly labeled?" against the OLD
+  // labels, so a relabel stales it: NULL the verdict + its fingerprint so no
+  // later gate reuses a pre-relabel judgment.
+  //
+  // delist=true (the AUTHOR path): a label change on a listed/pending/held
+  // work also drops the listing — an author cannot downgrade a rating while
+  // staying on the public shelf. The accept-suggested-labels flow re-requests
+  // the listing afterward, so the fresh gate sees the new labels.
+  // delist=false (the OPERATOR relabel): the operator IS the moderator, so
+  // the listing stands; only the cached verdict is staled.
+  const delistClause = delist
+    ? ', listing_state = NULL, listed = 0, listed_at = NULL, listing_verdict = NULL'
+    : '';
   await db
-    .prepare('UPDATE works SET rating = ?1, warnings = ?2, updated_at = ?3, content_hash = NULL WHERE id = ?4')
+    .prepare(
+      `UPDATE works SET rating = ?1, warnings = ?2, updated_at = ?3,
+         moderation_verdict = NULL, moderation_at = NULL, verdict_fingerprint = NULL${delistClause}
+       WHERE id = ?4`,
+    )
     .bind(rating, JSON.stringify(warnings), updatedAt, id)
     .run();
 }

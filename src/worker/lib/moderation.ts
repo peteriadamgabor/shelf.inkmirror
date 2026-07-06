@@ -46,6 +46,7 @@ import {
   type WarningTag,
 } from '../../format';
 import type { Env } from './env';
+import { contentHash } from './content-hash';
 import { incrementCounter, setModerationVerdict } from './db';
 
 // Model choices (Claude API, 2026-07): claude-haiku-4-5 is the current
@@ -100,6 +101,24 @@ export function chainRunsKey(now: Date = new Date()): string {
 export async function consumeChainBudget(env: Env): Promise<boolean> {
   const used = await incrementCounter(env.SHELF_DB, chainRunsKey());
   return used <= chainDailyCap(env.CHAIN_DAILY_CAP);
+}
+
+// ---------- verdict fingerprint ----------
+
+/**
+ * The exact artifact a verdict reviewed: content hash + rating + normalized
+ * warnings. The listing gate reuses a stored verdict ONLY when this matches
+ * the current bundle + labels — so a verdict earned by different content or
+ * different labels can never be laundered onto the public shelf. Warnings are
+ * sorted + deduped so tag order never changes the fingerprint.
+ */
+export function verdictFingerprint(
+  contentHash: string,
+  rating: string,
+  warnings: readonly string[],
+): string {
+  const normalized = [...new Set(warnings)].sort().join(',');
+  return `${contentHash}|${rating}|${normalized}`;
 }
 
 // ---------- verdict ----------
@@ -723,10 +742,24 @@ export async function runModerationChain(
     ? await runChainVerdict(apiKey, bundle, workId)
     : budgetSkippedVerdict();
 
+  // Bind the verdict to the exact artifact reviewed. The guarded write
+  // (WHERE content_hash = reviewedHash) no-ops if the author updated the
+  // content between scheduling and now — a late verdict never lands on
+  // superseded prose.
+  const reviewedHash = await contentHash(bundle);
+  const fingerprint = verdictFingerprint(reviewedHash, bundle.rating, bundle.warnings);
+
   try {
     // Silently a no-op when the work was unpublished mid-run — the UPDATE
     // simply matches zero rows.
-    await setModerationVerdict(env.SHELF_DB, workId, JSON.stringify(verdict), new Date().toISOString());
+    await setModerationVerdict(
+      env.SHELF_DB,
+      workId,
+      JSON.stringify(verdict),
+      new Date().toISOString(),
+      reviewedHash,
+      fingerprint,
+    );
   } catch (e) {
     console.error(`[moderation] verdict write failed: ${e instanceof Error ? e.message : String(e)}`);
     return;
@@ -749,9 +782,15 @@ export function scheduleModeration(
   env: Env,
   bundle: PublishBundleV1,
   workId: string,
+  passwordProtected: boolean,
 ): void {
   const apiKey = env.ANTHROPIC_API_KEY;
   if (apiKey === undefined || apiKey.length === 0) return;
+  // A password-locked work is private: it cannot be listed, and its prose
+  // must never be sent to a third-party model. Skip the shadow chain
+  // entirely — same posture as the no-key path. When the password is later
+  // removed, the next content/label change or listing request runs the chain.
+  if (passwordProtected) return;
   let total = 0;
   for (const b of bundle.blocks) total += b.content.length;
   if (total < MIN_MODERATED_CHARS) return;

@@ -49,12 +49,20 @@ export type RelabelResult =
   | { ok: true; updated_at: string }
   | { ok: false; error: 'bundle_missing' };
 
-/** Mutate the stored bundle's labels, re-bake all pages, update the row. */
+/**
+ * Mutate the stored bundle's labels, re-bake all pages, update the row.
+ *
+ * `delist` distinguishes the two authorities: the AUTHOR (true) drops any
+ * listing on a label change — no downgrading a rating while staying public;
+ * the OPERATOR (false) is the moderator, so the listing stands. Either way
+ * the stale verdict is cleared inside relabelWork.
+ */
 export async function relabelAndRebake(
   env: Env,
   id: string,
   rating: Rating,
   warnings: WarningTag[],
+  delist: boolean,
 ): Promise<RelabelResult> {
   const obj = await env.SHELF_R2.get(bundleKey(id));
   if (obj === null) return { ok: false, error: 'bundle_missing' };
@@ -72,6 +80,6 @@ export async function relabelAndRebake(
   await bakeWork(bundle, id, env);
 
   const updatedAt = new Date().toISOString();
-  await relabelWork(env.SHELF_DB, id, rating, warnings, updatedAt);
+  await relabelWork(env.SHELF_DB, id, rating, warnings, updatedAt, delist);
   return { ok: true, updated_at: updatedAt };
 }

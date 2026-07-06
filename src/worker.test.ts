@@ -173,14 +173,18 @@ class FakeStatement {
         listing_state: null,
         listed_at: null,
         listing_verdict: null,
+        verdict_fingerprint: null,
       });
       return { success: true };
     }
-    if (s.includes('SET moderation_verdict')) {
-      const row = this.works.get(String(a[2]));
-      if (row) {
+    if (s.includes('SET moderation_verdict = ?1')) {
+      // UPDATE ... SET moderation_verdict=?1, moderation_at=?2,
+      //   verdict_fingerprint=?3 WHERE id=?4 AND content_hash=?5
+      const row = this.works.get(String(a[3]));
+      if (row && row.content_hash === String(a[4])) {
         row.moderation_verdict = String(a[0]);
         row.moderation_at = String(a[1]);
+        row.verdict_fingerprint = String(a[2]);
       }
       return { success: true };
     }
@@ -232,15 +236,30 @@ class FakeStatement {
       return { success: true };
     }
     if (s.includes('UPDATE works SET title')) {
-      const row = this.works.get(String(a[7]));
+      // SET title=?1, pen_name=?2, language=?3, rating=?4, warnings=?5,
+      //   word_count=?6, first_line=?7, content_hash=?8, updated_at=?9
+      //   [, moderation/listing reset...] WHERE id=?10
+      const row = this.works.get(String(a[9]));
       if (row) {
         row.title = String(a[0]);
-        row.rating = String(a[1]);
-        row.warnings = String(a[2]);
-        row.word_count = Number(a[3]);
-        row.first_line = String(a[4]);
-        row.content_hash = String(a[5]);
-        row.updated_at = String(a[6]);
+        row.pen_name = String(a[1]);
+        row.language = String(a[2]);
+        row.rating = String(a[3]);
+        row.warnings = String(a[4]);
+        row.word_count = Number(a[5]);
+        row.first_line = String(a[6]);
+        row.content_hash = String(a[7]);
+        row.updated_at = String(a[8]);
+        if (s.includes('moderation_verdict = NULL')) {
+          // resetModeration: stale verdict cleared + listing dropped.
+          row.moderation_verdict = null;
+          row.moderation_at = null;
+          row.verdict_fingerprint = null;
+          row.listing_state = null;
+          row.listed = 0;
+          row.listed_at = null;
+          row.listing_verdict = null;
+        }
       }
       return { success: true };
     }
@@ -266,13 +285,26 @@ class FakeStatement {
       return { success: true };
     }
     if (s.includes('UPDATE works SET rating')) {
+      // SET rating=?1, warnings=?2, updated_at=?3, moderation_verdict=NULL,
+      //   moderation_at=NULL, verdict_fingerprint=NULL [, listing reset]
+      //   WHERE id=?4
       const row = this.works.get(String(a[3]));
       if (row) {
         row.rating = String(a[0]);
         row.warnings = String(a[1]);
         row.updated_at = String(a[2]);
-        // Relabel stales the cached verdict (see relabelWork in db.ts).
-        row.content_hash = null;
+        // Relabel stales the cached verdict (content_hash stays — the prose
+        // did not change; only the verdict + its fingerprint are cleared).
+        row.moderation_verdict = null;
+        row.moderation_at = null;
+        row.verdict_fingerprint = null;
+        if (s.includes('listing_state = NULL')) {
+          // Author relabel delists; operator relabel keeps the listing.
+          row.listing_state = null;
+          row.listed = 0;
+          row.listed_at = null;
+          row.listing_verdict = null;
+        }
       }
       return { success: true };
     }
@@ -2345,9 +2377,9 @@ describe('PUT /api/works/:id/listing — the gate', () => {
     const { calls } = stubModerationFetch({});
     const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
     const { id, manageSecret } = await publish(h, makeModeratedBundle());
-    // Pre-0006 row (NULL hash): the gate must run the chain fresh — the
-    // verdict-reuse path has its own coverage in the budget-guard suite.
-    h.d1.works.get(id)!.content_hash = null;
+    // No reusable verdict: the gate must run the chain fresh — the
+    // verdict-reuse path has its own coverage below.
+    h.d1.works.get(id)!.verdict_fingerprint = null;
 
     const res = await putListing(h, id, manageSecret, true);
     expect(res.status).toBe(200);
@@ -2380,8 +2412,8 @@ describe('PUT /api/works/:id/listing — the gate', () => {
     });
     const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
     const { id, manageSecret } = await publish(h, makeModeratedBundle());
-    // Pre-0006 row (NULL hash) → fresh chain run, not verdict reuse.
-    h.d1.works.get(id)!.content_hash = null;
+    // No reusable verdict: force a fresh chain run.
+    h.d1.works.get(id)!.verdict_fingerprint = null;
     // The shadow run on publish already pinged Discord once — count from here.
     const discordBefore = discordCalls(calls).length;
 
@@ -2456,8 +2488,8 @@ describe('PUT /api/works/:id/listing — the gate', () => {
     });
     const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
     const { id, manageSecret } = await publish(h, makeModeratedBundle());
-    // Pre-0006 row (NULL hash) → fresh chain run, not verdict reuse.
-    h.d1.works.get(id)!.content_hash = null;
+    // No reusable verdict: force a fresh chain run.
+    h.d1.works.get(id)!.verdict_fingerprint = null;
     const discordBefore = discordCalls(calls).length;
 
     await putListing(h, id, manageSecret, true);
@@ -2481,9 +2513,9 @@ describe('PUT /api/works/:id/listing — the gate', () => {
     stubModerationFetch({});
     const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
     const { id, manageSecret } = await publish(h, makeModeratedBundle());
-    // Stale the stored pass verdict (pre-0006 NULL hash) so the gate must
-    // run the chain — which is about to break.
-    h.d1.works.get(id)!.content_hash = null;
+    // Drop the reusable verdict so the gate must run the chain — which is
+    // about to break.
+    h.d1.works.get(id)!.verdict_fingerprint = null;
 
     const { calls } = stubModerationFetch({ anthropicStatus: 500 });
     await putListing(h, id, manageSecret, true);
@@ -3126,7 +3158,7 @@ describe('listing gate — verdict reuse', () => {
     expect(h.d1.works.get(id)?.listing_state).toBe('refused');
 
     await putLabels(h, id, manageSecret, 'explicit', ['sexual-content']);
-    expect(h.d1.works.get(id)?.content_hash).toBeNull(); // relabel stales the hash
+    expect(h.d1.works.get(id)?.verdict_fingerprint).toBeNull(); // relabel stales the verdict
 
     const callsBeforeRetry = anthropicCalls(calls).length;
     await putListing(h, id, manageSecret, true);
@@ -3139,7 +3171,8 @@ describe('listing gate — verdict reuse', () => {
     const { calls } = stubModerationFetch({});
     const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
     const { id, manageSecret } = await publish(h, makeModeratedBundle());
-    h.d1.works.get(id)!.content_hash = 'f'.repeat(64); // verdict is for other prose
+    // Verdict fingerprint no longer matches the current artifact → no reuse.
+    h.d1.works.get(id)!.verdict_fingerprint = 'staleprose|general|';
     const callsAfterPublish = anthropicCalls(calls).length;
 
     await putListing(h, id, manageSecret, true);
@@ -3160,6 +3193,142 @@ describe('listing gate — verdict reuse', () => {
 
     expect(anthropicCalls(calls).length).toBeGreaterThan(0);
     expect(h.d1.works.get(id)?.listing_state).toBe('listed');
+  });
+});
+
+// ---------- security hardening: listed works are immutable-after-review ----------
+
+function putUpdateTop(h: Harness, id: string, secret: string, bundle: PublishBundleV1): Promise<Response> {
+  return dispatch(
+    h,
+    new Request(`${BASE}/api/works/${id}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'x-manage-secret': secret },
+      body: JSON.stringify(bundle),
+    }),
+  );
+}
+
+describe('hardening — a public listing binds to the reviewed artifact', () => {
+  it('CRITICAL 1: updating a listed work with new content delists it', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h, makeBundle({ title: 'On The Shelf' }));
+    forceList(h, id, new Date().toISOString());
+    expect(h.d1.works.get(id)?.listed).toBe(1);
+
+    const changed = makeBundle({ title: 'On The Shelf' });
+    changed.blocks = [{ id: 'b1', chapter_id: 'ch1', type: 'text', content: 'Entirely different prose now.', order: 0, metadata: { type: 'text' } }];
+    const res = await putUpdateTop(h, id, manageSecret, changed);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Record<string, unknown>)['delisted']).toBe(true);
+
+    const row = h.d1.works.get(id);
+    expect(row?.listed).toBe(0);
+    expect(row?.listing_state).toBeNull();
+    expect(row?.listed_at).toBeNull();
+  });
+
+  it('CRITICAL 1: an identical re-push does NOT delist (idempotent)', async () => {
+    const h = makeEnv();
+    const bundle = makeBundle({ title: 'Stable' });
+    const { id, manageSecret } = await publish(h, bundle);
+    forceList(h, id, new Date().toISOString());
+
+    const res = await putUpdateTop(h, id, manageSecret, bundle);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Record<string, unknown>)['delisted']).toBe(false);
+    expect(h.d1.works.get(id)?.listed).toBe(1);
+  });
+
+  it('CRITICAL 1: setting a password on a listed work is refused (409)', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+    forceList(h, id, new Date().toISOString());
+
+    const res = await putPassword(h, id, manageSecret, 'a secret phrase');
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as Record<string, unknown>)['error']).toBe('listed');
+    expect(h.d1.works.get(id)?.password_hash).toBeNull(); // not set
+    expect(h.d1.works.get(id)?.listed).toBe(1); // still listed, unchanged
+  });
+
+  it('CRITICAL 1: an author label change on a listed work delists it', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h, makeBundle({ rating: 'general' }));
+    forceList(h, id, new Date().toISOString());
+
+    const res = await putLabels(h, id, manageSecret, 'mature', []);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Record<string, unknown>)['delisted']).toBe(true);
+    expect(h.d1.works.get(id)?.listed).toBe(0);
+    expect(h.d1.works.get(id)?.listing_state).toBeNull();
+  });
+
+  it('CRITICAL 2: changing content clears the reusable verdict fingerprint', async () => {
+    // Publish benign prose without a key, then hand-stamp a pass verdict +
+    // fingerprint for exactly that prose (a legitimate prior pass).
+    const h = makeEnv();
+    const benign = makeBundle({ title: 'Benign' });
+    const { id, manageSecret } = await publish(h, benign);
+    const row = h.d1.works.get(id)!;
+    const { contentHash } = await import('./worker/lib/content-hash');
+    const { verdictFingerprint } = await import('./worker/lib/moderation');
+    const benignHash = await contentHash(benign);
+    row.moderation_verdict = '{"outcome":"pass","truncated":false,"flaggedChunks":0,"model":"m","ms":1}';
+    row.verdict_fingerprint = verdictFingerprint(benignHash, benign.rating, benign.warnings);
+
+    // Swap in different prose. The stale pass must not survive as reusable —
+    // its fingerprint no longer describes the current artifact.
+    const swapped = makeBundle({ title: 'Benign' });
+    swapped.blocks = [{ id: 'b1', chapter_id: 'ch1', type: 'text', content: 'A different manuscript entirely.', order: 0, metadata: { type: 'text' } }];
+    await putUpdateTop(h, id, manageSecret, swapped);
+
+    expect(h.d1.works.get(id)?.verdict_fingerprint).toBeNull();
+    expect(h.d1.works.get(id)?.moderation_verdict).toBeNull();
+  });
+
+  it('CRITICAL 2: a late shadow verdict for superseded content does not land', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h, makeBundle());
+    // Simulate the row having moved on: content_hash reflects newer prose.
+    h.d1.works.get(id)!.content_hash = 'newhash'.padEnd(64, '0');
+    // A verdict write guarded on the OLD reviewed hash must no-op.
+    const { setModerationVerdict } = await import('./worker/lib/db');
+    await setModerationVerdict(h.d1 as unknown as D1Database, id, '{"outcome":"pass"}', new Date().toISOString(), 'oldhash'.padEnd(64, '0'), 'oldhash|general|');
+    expect(h.d1.works.get(id)?.moderation_verdict).toBeNull();
+  });
+
+  it('HIGH 5: a truncated pass is held for a human, never auto-listed', async () => {
+    // A long work the chain could only sample: even a "pass" must not list.
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const bundle = makeModeratedBundle();
+    const { id, manageSecret } = await publish(h, bundle);
+    const row = h.d1.works.get(id)!;
+    const { contentHash } = await import('./worker/lib/content-hash');
+    const { verdictFingerprint } = await import('./worker/lib/moderation');
+    const hash = await contentHash(bundle);
+    // Hand-stamp a TRUNCATED pass with a matching fingerprint (a reusable
+    // verdict) so the gate reuses it and must still refuse to auto-list.
+    row.content_hash = hash;
+    row.moderation_verdict = '{"outcome":"pass","truncated":true,"flaggedChunks":0,"model":"m","ms":1}';
+    row.verdict_fingerprint = verdictFingerprint(hash, bundle.rating, bundle.warnings);
+
+    await putListing(h, id, manageSecret, true);
+
+    const after = h.d1.works.get(id);
+    expect(after?.listing_state).toBe('held');
+    expect(after?.listed).toBe(0);
+    expect(JSON.parse(after?.listing_verdict ?? '{}')['reason']).toBe('truncated');
+  });
+
+  it('HIGH 6: a password-locked work is never sent to the moderation API', async () => {
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    // Lock it (allowed: not listed), then update — the shadow chain must skip.
+    await putPassword(h, id, manageSecret, 'beta readers only');
+    const { calls } = stubModerationFetch({});
+    await putUpdateTop(h, id, manageSecret, makeModeratedBundle('Fresh private draft prose here. '.repeat(20)));
+    expect(anthropicCalls(calls).length).toBe(0);
   });
 });
 

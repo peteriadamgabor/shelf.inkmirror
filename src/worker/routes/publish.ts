@@ -106,8 +106,9 @@ export async function handlePublish(
   });
 
   // Phase 2 shadow chain: content is already stored and baked — the chain
-  // only observes in the background. No-op without ANTHROPIC_API_KEY.
-  scheduleModeration(ctx, env, parsed, id);
+  // only observes in the background. No-op without ANTHROPIC_API_KEY. A fresh
+  // publish is never password-locked (the password is set later via manage).
+  scheduleModeration(ctx, env, parsed, id, false);
 
   return Response.json({ id, url: workUrl(id), manageSecret }, { status: 200 });
 }

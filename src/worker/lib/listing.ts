@@ -37,7 +37,13 @@
 import { isPublishBundle, type PublishBundleV1, type Rating, type WarningTag } from '../../format';
 import type { Env } from './env';
 import { contentHash } from './content-hash';
-import { consumeChainBudget, parseModerationVerdict, runChainVerdict, type ModerationVerdict } from './moderation';
+import {
+  consumeChainBudget,
+  parseModerationVerdict,
+  runChainVerdict,
+  verdictFingerprint,
+  type ModerationVerdict,
+} from './moderation';
 import {
   bundleKey,
   getWork,
@@ -56,12 +62,13 @@ import {
 export type ListingVerdict =
   | { reason: 'labels'; suggested?: { rating: Rating; warnings: WarningTag[] }; reused?: true }
   | { reason: 'review'; reused?: true }
+  | { reason: 'truncated'; reused?: true }
   | { reason: 'error' }
   | { reason: 'manual' }
   | { reason: 'operator' }
   | { reused: true };
 
-const LISTING_REASONS = new Set(['labels', 'review', 'error', 'manual', 'operator']);
+const LISTING_REASONS = new Set(['labels', 'review', 'truncated', 'error', 'manual', 'operator']);
 
 /** Lenient reader for stored listing_verdict JSON (manage meta + admin). */
 export function parseListingVerdict(raw: string | null): ListingVerdict | null {
@@ -211,15 +218,20 @@ export async function runListingGate(env: Env, workId: string): Promise<void> {
       return;
     }
 
-    // Content-hash reuse: a verdict from a real chain run (never a reused
-    // error — a broken run is not an observation) on exactly this prose
-    // makes the gate decision free.
+    // Verdict reuse: a stored verdict is reused ONLY when its fingerprint
+    // (content hash + rating + normalized warnings) exactly matches the
+    // current artifact. This is the fix for the laundering hole — an
+    // update-then-list can no longer ride a verdict earned by different
+    // content or different labels, because the fingerprint won't match. A
+    // reused error/skipped is never reused (a broken run is not an
+    // observation).
     const currentHash = await contentHash(bundle);
+    const currentFingerprint = verdictFingerprint(currentHash, bundle.rating, bundle.warnings);
     const stored = parseModerationVerdict(row.moderation_verdict);
     const reused =
       stored !== null &&
-      row.content_hash !== null &&
-      row.content_hash === currentHash &&
+      row.verdict_fingerprint !== null &&
+      row.verdict_fingerprint === currentFingerprint &&
       (stored.outcome === 'pass' || stored.outcome === 'tag-fix' || stored.outcome === 'hold');
 
     let verdict: ModerationVerdict;
@@ -244,9 +256,35 @@ export async function runListingGate(env: Env, workId: string): Promise<void> {
         return;
       }
       verdict = await runChainVerdict(apiKey, bundle, workId);
-      // The chain ran — record the observation for the admin surface just
-      // like the shadow runs do (a plain UPDATE, silent if the row is gone).
-      await setModerationVerdict(env.SHELF_DB, workId, JSON.stringify(verdict), new Date().toISOString());
+      // The chain ran — record the observation, fingerprinted and guarded on
+      // the reviewed content hash (a concurrent update would make the guarded
+      // write no-op, never stamping a verdict onto superseded content).
+      await setModerationVerdict(
+        env.SHELF_DB,
+        workId,
+        JSON.stringify(verdict),
+        new Date().toISOString(),
+        currentHash,
+        currentFingerprint,
+      );
+    }
+
+    // A truncated review only sampled a long work — it must never AUTO-list
+    // (or auto-refuse); the omitted spans are exactly where hidden content
+    // would sit. Route pass/tag-fix on a truncated verdict to a human. (hold
+    // already goes to a human below; error/skipped fail safe below.)
+    if (verdict.truncated && (verdict.outcome === 'pass' || verdict.outcome === 'tag-fix')) {
+      if (await resolveAndConfirm(env, workId, 'held', null, { reason: 'truncated' })) {
+        await notifyListingDiscord(env, workId, row.title, {
+          title: 'LISTING HELD — work too long for full automated review',
+          description:
+            'The moderation chain could only sample this work, so it was not ' +
+            'auto-listed. Review the full text and approve or deny from the admin console.',
+          color: COLOR_EMBER,
+          footer: 'The work stays readable by link; it is NOT listed until you decide.',
+        });
+      }
+      return;
     }
 
     switch (verdict.outcome) {

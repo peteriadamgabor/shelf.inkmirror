@@ -179,6 +179,12 @@ async function setPassword(request: Request, env: Env, row: WorkRow): Promise<Re
   ) {
     return jsonError(400, 'invalid_password');
   }
+  // A password makes the work private, which is incompatible with being on
+  // the public shelf. Refuse rather than silently delisting — the author
+  // must choose (delist first, then lock).
+  if (row.listing_state === 'listed' || row.listing_state === 'pending' || row.listing_state === 'held') {
+    return jsonError(409, 'listed');
+  }
   await setPasswordHash(env.SHELF_DB, row.id, await hashPassword(password));
   return Response.json({ ok: true, passwordProtected: true });
 }
@@ -238,13 +244,18 @@ async function setLabels(request: Request, env: Env, row: WorkRow): Promise<Resp
   const labels = parseLabels(body);
   if (!labels.ok) return jsonError(400, labels.error);
 
-  const result = await relabelAndRebake(env, row.id, labels.rating, labels.warnings);
+  // Author authority: a label change drops any listing (no downgrading a
+  // rating while staying on the public shelf). The accept-suggested-labels
+  // flow re-requests the listing after this returns.
+  const delisted = row.listing_state !== null;
+  const result = await relabelAndRebake(env, row.id, labels.rating, labels.warnings, true);
   if (!result.ok) return jsonError(409, result.error);
   return Response.json({
     ok: true,
     rating: labels.rating,
     warnings: labels.warnings,
     updated_at: result.updated_at,
+    delisted,
   });
 }
 
@@ -286,38 +297,45 @@ async function update(
   const gate = await publishGates(env, bundleHash);
   if (gate !== null) return gate;
 
-  // Content-hash dedup, decided against the PRE-update row: identical prose
-  // that already has a verdict is not paid for twice — the old verdict
-  // stands, the shadow chain is skipped entirely (no budget consumed).
-  // NULL stored hash = pre-0006 row = unknown, run it. Labels are part of
-  // the verdict's inputs (a verdict answers "is this honestly labeled?"),
-  // so a rating/warnings change re-runs the chain even on identical prose —
-  // otherwise same-prose relabeling could ride a stale pass verdict onto
-  // the shelf unreviewed.
-  const unchanged =
+  // Did the published ARTIFACT (prose + declared labels) actually change?
+  // Decided against the PRE-update row. This is the signal for BOTH keeping
+  // the listing and skipping a redundant chain run — independent of whether
+  // a verdict happens to exist yet. NULL stored hash = pre-0006 row =
+  // unknown, so treat as changed. Labels are part of the artifact because a
+  // verdict answers "is this honestly labeled?" — a relabel on identical
+  // prose is a different artifact and must be re-judged.
+  const artifactUnchanged =
+    row.content_hash !== null &&
     row.content_hash === bundleHash &&
-    row.moderation_verdict !== null &&
     row.rating === parsed.rating &&
     row.warnings === JSON.stringify(parsed.warnings);
 
   await bakeWork(parsed, row.id, env);
 
+  // A real change drops any listing (critical: a listed work cannot be
+  // mutated out from under the review that approved it) and clears the stale
+  // verdict — both inside updateWork's single statement.
+  const delisted = !artifactUnchanged && row.listing_state !== null;
+
   const updatedAt = new Date().toISOString();
   await updateWork(env.SHELF_DB, row.id, {
     title: parsed.title,
+    pen_name: parsed.pen_name,
+    language: parsed.language,
     rating: parsed.rating,
     warnings: parsed.warnings,
     word_count: countWords(parsed),
     first_line: firstLine(parsed),
     content_hash: bundleHash,
     updated_at: updatedAt,
+    resetModeration: !artifactUnchanged,
   });
 
   // Updates re-run the shadow chain the same as first publishes — the new
   // text is already baked; the chain only observes. No-op without the key.
-  if (!unchanged) scheduleModeration(ctx, env, parsed, row.id);
+  if (!artifactUnchanged) scheduleModeration(ctx, env, parsed, row.id, row.password_hash !== null);
 
-  return Response.json({ ok: true, id: row.id, url: workUrl(row.id), updated_at: updatedAt });
+  return Response.json({ ok: true, id: row.id, url: workUrl(row.id), updated_at: updatedAt, delisted });
 }
 
 async function unpublish(env: Env, id: string): Promise<Response> {

@@ -206,7 +206,9 @@ async function relabel(request: Request, env: Env, row: WorkRow): Promise<Respon
   const labels = parseLabels(body);
   if (!labels.ok) return jsonError(400, labels.error);
 
-  const result = await relabelAndRebake(env, row.id, labels.rating, labels.warnings);
+  // Operator authority: the moderator relabels in place — the listing (if
+  // any) stands; only the cached verdict is staled inside relabelWork.
+  const result = await relabelAndRebake(env, row.id, labels.rating, labels.warnings, false);
   if (!result.ok) return jsonError(409, result.error);
   return Response.json({
     ok: true,
