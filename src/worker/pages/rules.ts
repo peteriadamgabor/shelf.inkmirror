@@ -72,6 +72,12 @@ the moment of moderation: every listing request is reviewed against these rules
 readable by its link; the author sees why and can fix the labels and try again.
 The shelf shows works by listing date only — no view counts, no rankings, ever.</p>
 
+<h2>Password-locked works</h2>
+<p>A work can be locked with a password the author shares privately — for beta readers
+or a writing circle. A locked work is treated as private: it is <strong>never sent to
+any moderation service</strong>, and it cannot be listed on the public shelf. Private and
+public are mutually exclusive by design.</p>
+
 <h2>Expiry</h2>
 <p>Unlisted links live for <strong>30 days</strong>. The author can renew from the manage
 link, any number of times, or unpublish at any moment. Nothing lingers by accident.

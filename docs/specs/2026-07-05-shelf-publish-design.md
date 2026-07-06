@@ -679,6 +679,40 @@ status = 'active' ORDER BY listed_at DESC`, filters `?rating=` /` ?lang=`,
 4. **Phase 3 — SHIPPED:** browse page + listing lifecycle + gate flip (for
    listings; publish/update stays shadow). See the Phase 3 section above.
 
+## Security hardening (external review, 2026-07-06)
+
+An external security review found real issues, all addressed:
+
+- **A public listing binds to the exact reviewed artifact.** Any author
+  content update on a listed/pending/held work atomically delists it (one
+  UPDATE; response `{ delisted: true }`); an author label change delists too
+  (the operator relabel does not — the operator is the moderator); setting a
+  password on a listed work is refused (409 `listed`). Enforced in the db
+  accessor layer, not just routes.
+- **Verdicts are fingerprinted.** `verdict_fingerprint = content_hash |
+  rating | normalized-warnings` of the reviewed bundle. The listing gate
+  reuses a verdict only on an exact fingerprint match; `setModerationVerdict`
+  is guarded `WHERE content_hash = reviewedHash` so a late chain run for
+  superseded content no-ops; a changed update NULLs the stale verdict +
+  fingerprint. Closes the publish-benign-then-swap laundering path.
+- **The validator is a sanitizer.** `sanitizePublishBundle` constructs a
+  fresh bundle with only allowlisted, type-checked, length-capped fields;
+  unknown fields cannot reach R2. Rejects duplicate ids and metadata-type
+  mismatch; caps scene fields + parenthetical (fixes a render `.trim()` crash
+  on a non-string scene field); keeps the loud tripwire on the known
+  unstripped-backup signal.
+- **Truncated reviews never auto-list** — a sampled long work is held for a
+  human (the omitted spans are where hidden content would sit).
+- **Password-locked works are private and never sent to Anthropic**, and
+  cannot be listed. (Also in the rules page.)
+- **Reports/letters** reject nonexistent/inactive works before any write or
+  Discord ping; the render-gate timestamp must be an integer 2s–24h old
+  (closing the `ts=0` bypass); body caps measure actual bytes.
+- **Non-atomic R2/D1 accepted, reconciled.** D1 gates every read, so an
+  orphaned R2 object is litter, not exposure. The daily cron sweeps orphans
+  and runs a listing-invariant canary (alerts, no auto-fix). Versioned R2
+  prefixes deferred until scale demands.
+
 ## Open questions
 
 1. Does the baked page need an "export as EPUB" button for readers, or is
