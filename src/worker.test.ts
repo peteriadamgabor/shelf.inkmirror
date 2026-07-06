@@ -88,10 +88,35 @@ class FakeStatement {
     return this.db.works;
   }
 
+  /** Filtered + ordered rows for the /shelf queries (list + count). */
+  private shelfRows(): WorkRow[] {
+    const s = this.sql;
+    let i = 0;
+    const rating = s.includes('rating = ?') ? String(this.args[i++]) : null;
+    const language = s.includes('language = ?') ? String(this.args[i++]) : null;
+    return [...this.works.values()]
+      .filter(
+        (w) =>
+          w.listed === 1 &&
+          w.status === 'active' &&
+          (rating === null || w.rating === rating) &&
+          (language === null || w.language === language),
+      )
+      .sort((a, b) => {
+        const la = a.listed_at ?? '';
+        const lb = b.listed_at ?? '';
+        if (la !== lb) return la < lb ? 1 : -1;
+        return a.id < b.id ? 1 : -1;
+      });
+  }
+
   async first<T>(): Promise<T | null> {
     const s = this.sql;
     if (s.includes('SELECT * FROM works WHERE id')) {
       return (this.works.get(String(this.args[0])) as T | undefined) ?? null;
+    }
+    if (s.includes('COUNT(*) AS n FROM works WHERE listed = 1')) {
+      return { n: this.shelfRows().length } as T;
     }
     if (s.includes('SELECT value FROM settings')) {
       const v = this.db.settings.get(String(this.args[0]));
@@ -136,6 +161,9 @@ class FakeStatement {
         removed_at: null,
         moderation_verdict: null,
         moderation_at: null,
+        listing_state: null,
+        listed_at: null,
+        listing_verdict: null,
       });
       return { success: true };
     }
@@ -144,6 +172,38 @@ class FakeStatement {
       if (row) {
         row.moderation_verdict = String(a[0]);
         row.moderation_at = String(a[1]);
+      }
+      return { success: true };
+    }
+    if (s.includes("SET listing_state = 'pending'")) {
+      const row = this.works.get(String(a[0]));
+      if (row) {
+        row.listing_state = 'pending';
+        row.listed = 0;
+        row.listed_at = null;
+        row.listing_verdict = null;
+      }
+      return { success: true };
+    }
+    if (s.includes('SET listing_state = NULL')) {
+      // delistWork — also part of removeWork, handled separately below.
+      const row = this.works.get(String(a[0]));
+      if (row) {
+        row.listing_state = null;
+        row.listed = 0;
+        row.listed_at = null;
+        row.listing_verdict = null;
+      }
+      return { success: true };
+    }
+    if (s.includes('SET listing_state = ?1')) {
+      const row = this.works.get(String(a[4]));
+      const guarded = s.includes("AND listing_state = 'pending'");
+      if (row && (!guarded || row.listing_state === 'pending')) {
+        row.listing_state = String(a[0]);
+        row.listed = Number(a[1]);
+        row.listed_at = a[2] === null ? null : String(a[2]);
+        row.listing_verdict = a[3] === null ? null : String(a[3]);
       }
       return { success: true };
     }
@@ -179,6 +239,11 @@ class FakeStatement {
       if (row) {
         row.status = 'removed';
         row.removed_at = String(a[0]);
+        // Operator removal also delists (see removeWork in db.ts).
+        row.listing_state = null;
+        row.listed = 0;
+        row.listed_at = null;
+        row.listing_verdict = null;
       }
       return { success: true };
     }
@@ -315,8 +380,32 @@ class FakeStatement {
           id: w.id, title: w.title, pen_name: w.pen_name, rating: w.rating,
           word_count: w.word_count, views: w.views, report_count: w.report_count,
           status: w.status, password_protected: w.password_hash !== null ? 1 : 0,
-          moderation_verdict: w.moderation_verdict,
+          moderation_verdict: w.moderation_verdict, listing_state: w.listing_state,
           created_at: w.created_at, expires_at: w.expires_at,
+        }) as T);
+      return { results };
+    }
+    if (s.includes("WHERE listing_state = 'held'")) {
+      const limit = Number(this.args[0]);
+      const results = [...this.works.values()]
+        .filter((w) => w.listing_state === 'held')
+        .sort((a, b) => (a.updated_at < b.updated_at ? -1 : 1))
+        .slice(0, limit)
+        .map((w) => ({
+          id: w.id, title: w.title, pen_name: w.pen_name, rating: w.rating,
+          listing_verdict: w.listing_verdict, updated_at: w.updated_at,
+        }) as T);
+      return { results };
+    }
+    if (s.includes('FROM works WHERE listed = 1')) {
+      const limit = Number(this.args[this.args.length - 2]);
+      const offset = Number(this.args[this.args.length - 1]);
+      const results = this.shelfRows()
+        .slice(offset, offset + limit)
+        .map((w) => ({
+          id: w.id, title: w.title, pen_name: w.pen_name, language: w.language,
+          rating: w.rating, warnings: w.warnings, word_count: w.word_count,
+          first_line: w.first_line, listed_at: w.listed_at,
         }) as T);
       return { results };
     }
@@ -1007,6 +1096,7 @@ interface Overview {
   totalViews: number;
   recentWorks: Array<Record<string, unknown>>;
   recentReports: Array<Record<string, unknown>>;
+  heldListings: Array<Record<string, unknown>>;
   publishingPaused: boolean;
   tombstones: Array<{ content_hash: string }>;
 }
@@ -2193,5 +2283,575 @@ describe('moderation chain (shadow mode)', () => {
       expect(String(b['url'])).toBe(`${BASE}/w/${String(b['id'])}`);
       expect(String(b['manageSecret']).length).toBeGreaterThanOrEqual(43);
     }
+  });
+});
+
+// ---------- Phase 3 — listing lifecycle + the gate ----------
+
+function putListing(h: Harness, id: string, secret: string, list: boolean): Promise<Response> {
+  return dispatch(
+    h,
+    new Request(`${BASE}/api/works/${id}/listing`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'x-manage-secret': secret },
+      body: JSON.stringify({ list }),
+    }),
+  );
+}
+
+function putLabels(h: Harness, id: string, secret: string, rating: string, warnings: string[]): Promise<Response> {
+  return dispatch(
+    h,
+    new Request(`${BASE}/api/works/${id}/labels`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'x-manage-secret': secret },
+      body: JSON.stringify({ rating, warnings }),
+    }),
+  );
+}
+
+function getMeta(h: Harness, id: string, secret: string): Promise<Response> {
+  return dispatch(h, new Request(`${BASE}/api/works/${id}`, { headers: { 'x-manage-secret': secret } }));
+}
+
+/** Put a work straight onto the shelf, bypassing the gate (test setup only). */
+function forceList(h: Harness, id: string, listedAt: string): void {
+  const row = h.d1.works.get(id);
+  if (!row) throw new Error(`forceList: no such work ${id}`);
+  row.listed = 1;
+  row.listing_state = 'listed';
+  row.listed_at = listedAt;
+}
+
+function listingVerdictOf(h: Harness, id: string): Record<string, unknown> | null {
+  const raw = h.d1.works.get(id)?.listing_verdict ?? null;
+  return raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
+}
+
+describe('PUT /api/works/:id/listing — the gate', () => {
+  it('happy path with key: pending → chain pass → listed + listed_at + Discord info embed', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+
+    const res = await putListing(h, id, manageSecret, true);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Record<string, unknown>)['listingState']).toBe('pending');
+
+    // dispatch() drained the waitUntil — the gate has resolved by now.
+    const row = h.d1.works.get(id);
+    expect(row?.listing_state).toBe('listed');
+    expect(row?.listed).toBe(1);
+    expect(typeof row?.listed_at).toBe('string');
+    expect(row?.listing_verdict).toBeNull();
+
+    const discord = discordCalls(calls);
+    expect(discord).toHaveLength(1);
+    const payload = JSON.stringify(discord[0]?.body);
+    expect(payload).toContain('Listed on the Shelf');
+    expect(payload).toContain(id);
+    expect(payload).toContain('general'); // rating travels in the info embed
+  });
+
+  it('tag-fix → refused with author-facing suggested labels; NO Discord; meta surfaces the verdict', async () => {
+    const { calls } = stubModerationFetch({
+      routerFlags: () => ['sexual-explicit'],
+      verifier: {
+        hardLine: 'none',
+        reason: 'explicit content without labels',
+        labels: 'under-labeled',
+        suggested: { rating: 'explicit', warnings: ['sexual-content'] },
+      },
+    });
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    // The shadow run on publish already pinged Discord once — count from here.
+    const discordBefore = discordCalls(calls).length;
+
+    await putListing(h, id, manageSecret, true);
+
+    const row = h.d1.works.get(id);
+    expect(row?.listing_state).toBe('refused');
+    expect(row?.listed).toBe(0);
+    expect(listingVerdictOf(h, id)).toEqual({
+      reason: 'labels',
+      suggested: { rating: 'explicit', warnings: ['sexual-content'] },
+    });
+    // tag-fix is the author's fix to make — no operator ping.
+    expect(discordCalls(calls).length).toBe(discordBefore);
+
+    const meta = (await (await getMeta(h, id, manageSecret)).json()) as Record<string, unknown>;
+    expect(meta['listingState']).toBe('refused');
+    expect(meta['listingVerdict']).toEqual({
+      reason: 'labels',
+      suggested: { rating: 'explicit', warnings: ['sexual-content'] },
+    });
+  });
+
+  it('accept-labels flow: PUT labels re-bakes, then a re-request passes and lists', async () => {
+    // Router always flags sexual-explicit; once the rating is explicit the
+    // flags are covered, so no verifier call is needed and the chain passes.
+    const { calls } = stubModerationFetch({
+      routerFlags: () => ['sexual-explicit'],
+      verifier: {
+        hardLine: 'none',
+        reason: 'explicit content without labels',
+        labels: 'under-labeled',
+        suggested: { rating: 'explicit', warnings: ['sexual-content'] },
+      },
+    });
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+
+    await putListing(h, id, manageSecret, true);
+    expect(h.d1.works.get(id)?.listing_state).toBe('refused');
+    const suggested = listingVerdictOf(h, id)?.['suggested'] as { rating: string; warnings: string[] };
+
+    // The manage page's accept button: PUT labels, then re-request.
+    const relabel = await putLabels(h, id, manageSecret, suggested.rating, suggested.warnings);
+    expect(relabel.status).toBe(200);
+    expect(h.d1.works.get(id)?.rating).toBe('explicit');
+    expect(h.r2.store.get(`works/${id}/index.html`)).toContain('badge-explicit');
+    const storedBundle = JSON.parse(h.r2.store.get(`works/${id}/bundle.json`) ?? '{}') as { rating: string };
+    expect(storedBundle.rating).toBe('explicit');
+
+    // Verifier calls so far: the shadow run at publish + the refusing gate run.
+    const verifierCallsBefore = anthropicCalls(calls).filter((c) => toolChoiceName(c) === 'verify_work').length;
+
+    const retry = await putListing(h, id, manageSecret, true);
+    expect(retry.status).toBe(200);
+    expect(h.d1.works.get(id)?.listing_state).toBe('listed');
+    expect(h.d1.works.get(id)?.listed).toBe(1);
+    // The second gate run went router-only: labels now cover the flags.
+    const verifierCallsAfter = anthropicCalls(calls).filter((c) => toolChoiceName(c) === 'verify_work').length;
+    expect(verifierCallsAfter).toBe(verifierCallsBefore);
+  });
+
+  it('hard-line hold → held with reason review + Discord "needs your decision"; work stays readable', async () => {
+    const { calls } = stubModerationFetch({
+      routerFlags: () => ['minors'],
+      verifier: {
+        hardLine: 'minors',
+        reason: 'the quoted scene involves a minor',
+        labels: 'honest',
+        suggested: { rating: 'general', warnings: [] },
+      },
+    });
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    const discordBefore = discordCalls(calls).length;
+
+    await putListing(h, id, manageSecret, true);
+
+    expect(h.d1.works.get(id)?.listing_state).toBe('held');
+    expect(h.d1.works.get(id)?.listed).toBe(0);
+    expect(listingVerdictOf(h, id)).toEqual({ reason: 'review' });
+
+    const discord = discordCalls(calls).slice(discordBefore);
+    expect(discord).toHaveLength(1);
+    const payload = JSON.stringify(discord[0]?.body);
+    expect(payload).toContain('LISTING HELD');
+    expect(payload).toContain('needs your decision');
+    expect(payload).toContain('the quoted scene involves a minor');
+
+    // Held ≠ removed: the reading link still works, the work is just not listed.
+    expect((await dispatch(h, new Request(`${BASE}/w/${id}`))).status).toBe(200);
+  });
+
+  it('chain error → held with reason error + Discord (a broken chain never lists)', async () => {
+    stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+
+    const { calls } = stubModerationFetch({ anthropicStatus: 500 });
+    await putListing(h, id, manageSecret, true);
+
+    expect(h.d1.works.get(id)?.listing_state).toBe('held');
+    expect(h.d1.works.get(id)?.listed).toBe(0);
+    expect(listingVerdictOf(h, id)).toEqual({ reason: 'error' });
+    const payload = JSON.stringify(discordCalls(calls).map((c) => c.body));
+    expect(payload).toContain('chain error');
+  });
+
+  it('no ANTHROPIC_API_KEY → held with reason manual + Discord "manual review" (documented fallback)', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({ DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id, manageSecret } = await publish(h);
+
+    const res = await putListing(h, id, manageSecret, true);
+    expect(res.status).toBe(200);
+    expect(h.d1.works.get(id)?.listing_state).toBe('held');
+    expect(h.d1.works.get(id)?.listed).toBe(0);
+    expect(listingVerdictOf(h, id)).toEqual({ reason: 'manual' });
+
+    expect(anthropicCalls(calls)).toHaveLength(0);
+    const discord = discordCalls(calls);
+    expect(discord).toHaveLength(1);
+    expect(JSON.stringify(discord[0]?.body)).toContain('LISTING REQUEST');
+    expect(JSON.stringify(discord[0]?.body)).toContain('manual review');
+  });
+
+  it('password-locked work → 409 password_locked, state untouched', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+    await putPassword(h, id, manageSecret, 'open sesame');
+
+    const res = await putListing(h, id, manageSecret, true);
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as Record<string, unknown>)['error']).toBe('password_locked');
+    expect(h.d1.works.get(id)?.listing_state).toBeNull();
+    expect(h.d1.works.get(id)?.listed).toBe(0);
+  });
+
+  it('delist always works: from listed, and as a withdrawal while held', async () => {
+    const h = makeEnv(); // no key → held
+    const { id, manageSecret } = await publish(h);
+
+    await putListing(h, id, manageSecret, true);
+    expect(h.d1.works.get(id)?.listing_state).toBe('held');
+    const withdrawn = await putListing(h, id, manageSecret, false);
+    expect(withdrawn.status).toBe(200);
+    expect(h.d1.works.get(id)?.listing_state).toBeNull();
+    expect(listingVerdictOf(h, id)).toBeNull();
+
+    forceList(h, id, new Date().toISOString());
+    const delisted = await putListing(h, id, manageSecret, false);
+    expect(delisted.status).toBe(200);
+    const row = h.d1.works.get(id);
+    expect(row?.listed).toBe(0);
+    expect(row?.listing_state).toBeNull();
+    expect(row?.listed_at).toBeNull();
+  });
+
+  it('re-requesting while held is a no-op: no second gate run, no Discord spam', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({ DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id, manageSecret } = await publish(h);
+
+    await putListing(h, id, manageSecret, true);
+    expect(discordCalls(calls)).toHaveLength(1);
+
+    const again = await putListing(h, id, manageSecret, true);
+    expect(again.status).toBe(200);
+    expect(((await again.json()) as Record<string, unknown>)['listingState']).toBe('held');
+    expect(discordCalls(calls)).toHaveLength(1); // still just the first ping
+  });
+
+  it('wrong secret → the same 404 on listing and labels routes', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    expect((await putListing(h, id, 'not-the-secret', true)).status).toBe(404);
+    expect((await putLabels(h, id, 'not-the-secret', 'mature', [])).status).toBe(404);
+    expect(h.d1.works.get(id)?.listing_state).toBeNull();
+    expect(h.d1.works.get(id)?.rating).toBe('general');
+  });
+
+  it('author delists mid-gate-run: the slow chain must not list against their will', async () => {
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    // Simulate a withdrawal landing while the chain is mid-flight.
+    const { calls } = stubModerationFetch({
+      onAnthropic: () => {
+        const row = h.d1.works.get(id);
+        if (row) {
+          row.listing_state = null;
+          row.listed = 0;
+        }
+      },
+    });
+    const discordBefore = discordCalls(calls).length;
+    await putListing(h, id, manageSecret, true);
+
+    const row = h.d1.works.get(id);
+    expect(row?.listing_state).toBeNull();
+    expect(row?.listed).toBe(0);
+    expect(discordCalls(calls).length).toBe(discordBefore); // skipped write = skipped ping
+  });
+});
+
+describe('PUT /api/works/:id/labels — author relabel', () => {
+  it('validates the fixed vocabularies', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+    expect((await putLabels(h, id, manageSecret, 'nc-17', [])).status).toBe(400);
+    expect((await putLabels(h, id, manageSecret, 'mature', ['spiders'])).status).toBe(400);
+    expect(h.d1.works.get(id)?.rating).toBe('general');
+  });
+
+  it('re-bakes every page with the new labels', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h, makeBundle3());
+    expect(h.r2.store.get(`works/${id}/index.html`)).toContain('badge-general');
+
+    const res = await putLabels(h, id, manageSecret, 'explicit', ['sexual-content']);
+    expect(res.status).toBe(200);
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({
+      ok: true,
+      rating: 'explicit',
+      warnings: ['sexual-content'],
+    });
+    expect(h.d1.works.get(id)?.rating).toBe('explicit');
+    expect(h.r2.store.get(`works/${id}/index.html`)).toContain('badge-explicit');
+    expect(h.r2.store.get(`works/${id}/ch/1.html`)).toContain('id="age-gate"'); // chapters re-baked too
+  });
+});
+
+describe('POST /api/admin/works/:id/listing — operator decision', () => {
+  it('approve on a manual hold → listed exactly like a chain pass', async () => {
+    const h = makeEnv({ ADMIN_SECRET }); // no key → manual hold
+    const { id, manageSecret } = await publish(h);
+    await putListing(h, id, manageSecret, true);
+    expect(h.d1.works.get(id)?.listing_state).toBe('held');
+
+    const res = await adminPost(h, `/api/admin/works/${id}/listing`, { action: 'approve' });
+    expect(res.status).toBe(200);
+    const row = h.d1.works.get(id);
+    expect(row?.listing_state).toBe('listed');
+    expect(row?.listed).toBe(1);
+    expect(typeof row?.listed_at).toBe('string');
+    expect(row?.listing_verdict).toBeNull();
+  });
+
+  it('deny → refused with reason operator, visible in the author meta', async () => {
+    const h = makeEnv({ ADMIN_SECRET });
+    const { id, manageSecret } = await publish(h);
+    await putListing(h, id, manageSecret, true);
+
+    const res = await adminPost(h, `/api/admin/works/${id}/listing`, { action: 'deny' });
+    expect(res.status).toBe(200);
+    expect(h.d1.works.get(id)?.listing_state).toBe('refused');
+    expect(h.d1.works.get(id)?.listed).toBe(0);
+    expect(listingVerdictOf(h, id)).toEqual({ reason: 'operator' });
+
+    const meta = (await (await getMeta(h, id, manageSecret)).json()) as Record<string, unknown>;
+    expect(meta['listingState']).toBe('refused');
+    expect(meta['listingVerdict']).toEqual({ reason: 'operator' });
+  });
+
+  it('rejects bad actions and decisions on works with no pending/held request', async () => {
+    const h = makeEnv({ ADMIN_SECRET });
+    const { id } = await publish(h);
+    expect((await adminPost(h, `/api/admin/works/${id}/listing`, { action: 'shrug' })).status).toBe(400);
+    expect((await adminPost(h, `/api/admin/works/${id}/listing`, { action: 'approve' })).status).toBe(409);
+    forceList(h, id, new Date().toISOString());
+    expect((await adminPost(h, `/api/admin/works/${id}/listing`, { action: 'deny' })).status).toBe(409);
+  });
+
+  it('overview surfaces held listings as the Needs-decision queue, and listing_state on rows', async () => {
+    const h = makeEnv({ ADMIN_SECRET });
+    const held = await publish(h);
+    const plain = await publish(h);
+    await putListing(h, held.id, held.manageSecret, true); // no key → held/manual
+
+    const o = (await (await adminGet(h, '/api/admin/overview')).json()) as Overview;
+    expect(o.heldListings).toHaveLength(1);
+    expect(o.heldListings[0]?.['id']).toBe(held.id);
+    expect(o.heldListings[0]?.['listing']).toEqual({ reason: 'manual' });
+    expect(o.heldListings[0]?.['listing_verdict']).toBeUndefined(); // raw JSON never leaves
+
+    const rows = new Map(o.recentWorks.map((w) => [w['id'], w]));
+    expect(rows.get(held.id)?.['listing_state']).toBe('held');
+    expect(rows.get(plain.id)?.['listing_state']).toBeNull();
+  });
+
+  it('admin remove delists a listed work', async () => {
+    const h = makeEnv({ ADMIN_SECRET });
+    const { id } = await publish(h);
+    forceList(h, id, new Date().toISOString());
+
+    const res = await adminPost(h, `/api/admin/works/${id}/remove`, {});
+    expect(res.status).toBe(200);
+    const row = h.d1.works.get(id);
+    expect(row?.status).toBe('removed');
+    expect(row?.listed).toBe(0);
+    expect(row?.listing_state).toBeNull();
+    expect(row?.listed_at).toBeNull();
+  });
+});
+
+// ---------- Phase 3 — GET /shelf ----------
+
+/** Publish n works and force-list them with strictly increasing listed_at. */
+async function publishListed(
+  h: Harness,
+  n: number,
+  mutate?: (bundle: PublishBundleV1, i: number) => void,
+): Promise<string[]> {
+  const ids: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const bundle = makeBundle({ title: `Listed Work ${i}` });
+    mutate?.(bundle, i);
+    const { id } = await publish(h, bundle);
+    forceList(h, id, new Date(Date.UTC(2026, 0, 1 + i)).toISOString());
+    ids.push(id);
+  }
+  return ids;
+}
+
+describe('GET /shelf', () => {
+  it('shows only listed+active works — refused/held/pending/unlisted/removed never appear', async () => {
+    const h = makeEnv({ ADMIN_SECRET });
+    const listed = await publish(h, makeBundle({ title: 'The Visible One' }));
+    forceList(h, listed.id, new Date().toISOString());
+
+    const unlisted = await publish(h, makeBundle({ title: 'Merely Linked' }));
+    const pending = await publish(h, makeBundle({ title: 'Waiting Room' }));
+    h.d1.works.get(pending.id)!.listing_state = 'pending';
+    const refused = await publish(h, makeBundle({ title: 'Refused One' }));
+    h.d1.works.get(refused.id)!.listing_state = 'refused';
+    const held = await publish(h, makeBundle({ title: 'Held One' }));
+    h.d1.works.get(held.id)!.listing_state = 'held';
+    const removed = await publish(h, makeBundle({ title: 'Removed One' }));
+    forceList(h, removed.id, new Date().toISOString());
+    await adminPost(h, `/api/admin/works/${removed.id}/remove`, {});
+
+    const res = await dispatch(h, new Request(`${BASE}/shelf`));
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('The Visible One');
+    expect(html).toContain(`href="/w/${listed.id}"`); // card links to the reading page
+    for (const absent of ['Merely Linked', 'Waiting Room', 'Refused One', 'Held One', 'Removed One']) {
+      expect(html, absent).not.toContain(absent);
+    }
+    expect(html).toContain('1 work'); // the count matches what is visible
+  });
+
+  it('is the ONE route without noindex: header absent, meta absent, description present; /w/* keeps noindex', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    forceList(h, id, new Date().toISOString());
+
+    const shelf = await dispatch(h, new Request(`${BASE}/shelf`));
+    expect(shelf.status).toBe(200);
+    expect(shelf.headers.get('x-robots-tag')).toBeNull();
+    expect(shelf.headers.get('cache-control')).toBe('public, max-age=60');
+    expect(shelf.headers.get('content-security-policy')).toContain("default-src 'none'");
+    const html = await shelf.text();
+    expect(html).not.toContain('noindex');
+    expect(html).toContain('<meta name="description"');
+
+    const reading = await dispatch(h, new Request(`${BASE}/w/${id}`));
+    expect(reading.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+    const landing = await dispatch(h, new Request(`${BASE}/`));
+    expect(landing.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+    expect(await landing.text()).toContain('href="/shelf"'); // the quiet third CTA
+  });
+
+  it('filters by rating and language, chips link plainly, filtered count matches', async () => {
+    const h = makeEnv();
+    await publishListed(h, 1, (b) => {
+      b.title = 'Mature English';
+      b.rating = 'mature';
+    });
+    const huIds = await publish(h, makeBundle({ title: 'Magyar Mese', language: 'hu' }));
+    forceList(h, huIds.id, new Date(Date.UTC(2026, 1, 1)).toISOString());
+
+    const mature = await (await dispatch(h, new Request(`${BASE}/shelf?rating=mature`))).text();
+    expect(mature).toContain('Mature English');
+    expect(mature).not.toContain('Magyar Mese');
+    expect(mature).toContain('1 work');
+
+    const hu = await (await dispatch(h, new Request(`${BASE}/shelf?lang=hu`))).text();
+    expect(hu).toContain('Magyar Mese');
+    expect(hu).not.toContain('Mature English');
+    expect(hu).toContain('lang-tag'); // non-en works carry the language tag
+
+    const both = await (await dispatch(h, new Request(`${BASE}/shelf?rating=general&lang=hu`))).text();
+    expect(both).toContain('Magyar Mese');
+
+    const none = await (await dispatch(h, new Request(`${BASE}/shelf?rating=explicit`))).text();
+    expect(none).toContain('Nothing on this shelf yet');
+    expect(none).toContain('0 works');
+  });
+
+  it('paginates at 24 per page with plain Older/Newer links, newest listing first', async () => {
+    const h = makeEnv();
+    const ids = await publishListed(h, 25);
+    const newestId = ids[24] ?? '';
+    const oldestId = ids[0] ?? '';
+
+    const p1res = await dispatch(h, new Request(`${BASE}/shelf`));
+    const p1 = await p1res.text();
+    expect(p1).toContain('25 works');
+    expect(p1).toContain(`href="/w/${newestId}"`);
+    expect(p1).not.toContain(`href="/w/${oldestId}"`); // page 2 material
+    expect(p1).toContain('href="/shelf?page=2"');
+    expect(p1).toContain('Older');
+    expect(p1).not.toContain('Newer');
+
+    const p2 = await (await dispatch(h, new Request(`${BASE}/shelf?page=2`))).text();
+    expect(p2).toContain(`href="/w/${oldestId}"`);
+    expect(p2).not.toContain(`href="/w/${newestId}"`);
+    expect(p2).toContain('href="/shelf"'); // Newer goes back to the clean page 1
+    expect(p2).toContain('Newer');
+    expect(p2).not.toContain('Older');
+
+    // Past the end: empty state, no crash.
+    const p3 = await (await dispatch(h, new Request(`${BASE}/shelf?page=3`))).text();
+    expect(p3).toContain('Nothing on this shelf yet');
+  });
+
+  it('cards carry cover, first line, badge, warning count, tabular words — and NO view counts', async () => {
+    const h = makeEnv();
+    const general = await publish(
+      h,
+      makeBundle({ title: 'A Quiet Book', warnings: ['graphic-violence', 'self-harm'] }),
+    );
+    forceList(h, general.id, new Date(Date.UTC(2026, 0, 1)).toISOString());
+    h.d1.works.get(general.id)!.views = 12345678; // must never surface
+
+    const html = await (await dispatch(h, new Request(`${BASE}/shelf`))).text();
+    expect(html).toContain('class="cover"');
+    expect(html).toContain('linear-gradient'); // typographic cover gradient
+    expect(html).toContain('Two hearts, one soul.'); // first_line teaser
+    expect(html).toContain('badge-general');
+    expect(html).toContain('+2 warnings'); // count, never the full list
+    expect(html).not.toContain('Graphic violence');
+    expect(html).toContain('8 words');
+    // The no-metrics decision: no opens, no views, no ranking vocabulary.
+    expect(html).not.toContain('12345678');
+    expect(html).not.toContain('opens');
+    expect(html.toLowerCase()).not.toContain('trending');
+  });
+
+  it('explicit cards get the synopsis-free treatment: badge yes, first line no, link intact', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h, makeBundle({ rating: 'explicit', warnings: ['sexual-content'] }));
+    forceList(h, id, new Date().toISOString());
+
+    const html = await (await dispatch(h, new Request(`${BASE}/shelf`))).text();
+    expect(html).toContain('badge-explicit');
+    expect(html).toContain(`href="/w/${id}"`);
+    expect(html).not.toContain('Two hearts, one soul.'); // no prose teaser on explicit cards
+  });
+
+  it('the cover gradient is deterministic per work id', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    forceList(h, id, new Date().toISOString());
+    const first = await (await dispatch(h, new Request(`${BASE}/shelf`))).text();
+    const second = await (await dispatch(h, new Request(`${BASE}/shelf`))).text();
+    const gradient = (html: string): string => html.match(/linear-gradient\([^)]+\)/)?.[0] ?? '';
+    expect(gradient(first)).not.toBe('');
+    expect(gradient(first)).toBe(gradient(second));
+  });
+});
+
+describe('purge cron vs listed works', () => {
+  it('skips listed works past their expiry — listing suspends the clock', async () => {
+    const h = makeEnv();
+    const listed = await publish(h);
+    const unlisted = await publish(h);
+    forceList(h, listed.id, new Date().toISOString());
+    h.d1.works.get(listed.id)!.expires_at = new Date(Date.now() - 1000).toISOString();
+    h.d1.works.get(unlisted.id)!.expires_at = new Date(Date.now() - 1000).toISOString();
+
+    const { ctx, drain } = makeCtx();
+    await worker.scheduled({} as ScheduledController, h.env, ctx);
+    await drain();
+
+    expect(h.d1.works.has(listed.id)).toBe(true);
+    expect(h.r2.store.has(`works/${listed.id}/index.html`)).toBe(true);
+    expect(h.d1.works.has(unlisted.id)).toBe(false);
   });
 });
