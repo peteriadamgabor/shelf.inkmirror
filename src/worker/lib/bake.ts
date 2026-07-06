@@ -60,3 +60,25 @@ export async function deleteWorkObjects(r2: R2Bucket, id: string): Promise<void>
   const keys = await listKeys(r2, workPrefix(id));
   if (keys.length > 0) await deleteKeys(r2, keys);
 }
+
+/**
+ * The distinct work ids that have objects under `works/` in R2, up to `limit`.
+ * Used by the daily cron's orphan sweep to find R2 objects whose D1 row is
+ * gone (a partial-failure leftover). Uses the delimiter so one entry comes
+ * back per work, not per object.
+ */
+export async function listWorkIds(r2: R2Bucket, limit: number): Promise<string[]> {
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  while (ids.length < limit) {
+    const page = await r2.list({ prefix: 'works/', delimiter: '/', cursor });
+    for (const p of page.delimitedPrefixes) {
+      // p is `works/{id}/` — pull out the id.
+      const id = p.slice('works/'.length, -1);
+      if (id.length > 0) ids.push(id);
+    }
+    if (!page.truncated) break;
+    cursor = page.cursor;
+  }
+  return ids.slice(0, limit);
+}

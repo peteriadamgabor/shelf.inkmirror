@@ -344,6 +344,29 @@ export async function listRemovedBefore(db: D1Database, cutoffIso: string, limit
   return results.map((r) => r.id);
 }
 
+/** True iff a work row with this id exists (cron orphan sweep). */
+export async function workExists(db: D1Database, id: string): Promise<boolean> {
+  const row = await db.prepare('SELECT 1 AS n FROM works WHERE id = ?1').bind(id).first<{ n: number }>();
+  return row !== null;
+}
+
+/**
+ * Rows that violate the core listing invariant (listed = 1 implies
+ * listing_state='listed', status='active', and no password). Should always
+ * be empty; the daily cron alerts if it is not — a canary, no auto-fix.
+ */
+export async function listInvariantViolations(db: D1Database, limit: number): Promise<string[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT id FROM works
+       WHERE listed = 1 AND (listing_state != 'listed' OR status != 'active' OR password_hash IS NOT NULL)
+       LIMIT ?1`,
+    )
+    .bind(limit)
+    .all<{ id: string }>();
+  return results.map((r) => r.id);
+}
+
 export function bundleKey(id: string): string {
   return `works/${id}/bundle.json`;
 }

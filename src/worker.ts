@@ -33,8 +33,8 @@
 
 import type { Env } from './worker/lib/env';
 import { WORK_ID_RE, preflightResponse, withCors } from './worker/lib/http';
-import { deleteWorkObjects } from './worker/lib/bake';
-import { deleteWork, listExpired, listRemovedBefore } from './worker/lib/db';
+import { deleteWorkObjects, listWorkIds } from './worker/lib/bake';
+import { deleteWork, listExpired, listInvariantViolations, listRemovedBefore, workExists } from './worker/lib/db';
 import { handlePublish } from './worker/routes/publish';
 import { handleManage } from './worker/routes/manage';
 import { handleReport, reportPage } from './worker/routes/report';
@@ -102,7 +102,7 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(purgeExpired(env));
+    ctx.waitUntil(dailyMaintenance(env));
   },
 } satisfies ExportedHandler<Env>;
 
@@ -225,4 +225,51 @@ async function purgeExpired(env: Env): Promise<void> {
     }
     if (ids.length < PURGE_BATCH) break;
   }
+}
+
+/** Objects to inspect per orphan-sweep run — bounded to stay within CPU limits. */
+const ORPHAN_SWEEP_LIMIT = 5000;
+
+/**
+ * R2/D1 writes are not transactional (D1 gates every read, so an orphaned R2
+ * object is litter, not exposure). This sweep is the reconciliation: any
+ * `works/{id}/` prefix whose D1 row is gone gets its objects deleted.
+ */
+async function sweepOrphans(env: Env): Promise<void> {
+  const ids = await listWorkIds(env.SHELF_R2, ORPHAN_SWEEP_LIMIT);
+  for (const id of ids) {
+    if (!(await workExists(env.SHELF_DB, id))) {
+      await deleteWorkObjects(env.SHELF_R2, id);
+    }
+  }
+}
+
+/**
+ * Canary: the listing invariant (listed=1 ⇒ listed state, active, no password)
+ * is enforced in the accessor layer, but SQLite can't express it as a CHECK
+ * on a live table. If a row ever violates it, alert — do not auto-fix.
+ */
+async function checkInvariants(env: Env): Promise<void> {
+  const bad = await listInvariantViolations(env.SHELF_DB, 50);
+  if (bad.length === 0) return;
+  const hook = env.DISCORD_WEBHOOK;
+  if (hook === undefined || hook.length === 0) return;
+  try {
+    await fetch(hook, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        content: `⚠️ **Shelf integrity**: ${bad.length} listed work(s) violate the listing invariant: ${bad.join(', ').slice(0, 1500)}`,
+        allowed_mentions: { parse: [] as string[] },
+      }),
+    });
+  } catch {
+    /* the next run re-checks */
+  }
+}
+
+async function dailyMaintenance(env: Env): Promise<void> {
+  await purgeExpired(env);
+  await sweepOrphans(env);
+  await checkInvariants(env);
 }

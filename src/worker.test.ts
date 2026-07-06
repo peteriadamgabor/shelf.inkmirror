@@ -21,16 +21,24 @@ class FakeR2 {
   async delete(keys: string | string[]): Promise<void> {
     for (const k of Array.isArray(keys) ? keys : [keys]) this.store.delete(k);
   }
-  async list(opts?: { prefix?: string; cursor?: string }): Promise<{
+  async list(opts?: { prefix?: string; cursor?: string; delimiter?: string }): Promise<{
     objects: { key: string }[];
     truncated: false;
     delimitedPrefixes: string[];
   }> {
     const prefix = opts?.prefix ?? '';
-    const objects = [...this.store.keys()]
-      .filter((k) => k.startsWith(prefix))
-      .map((key) => ({ key }));
-    return { objects, truncated: false, delimitedPrefixes: [] };
+    const matching = [...this.store.keys()].filter((k) => k.startsWith(prefix));
+    if (opts?.delimiter !== undefined) {
+      const delim = opts.delimiter;
+      const prefixes = new Set<string>();
+      for (const k of matching) {
+        const rest = k.slice(prefix.length);
+        const i = rest.indexOf(delim);
+        if (i !== -1) prefixes.add(prefix + rest.slice(0, i + delim.length));
+      }
+      return { objects: [], truncated: false, delimitedPrefixes: [...prefixes] };
+    }
+    return { objects: matching.map((key) => ({ key })), truncated: false, delimitedPrefixes: [] };
   }
   keysWithPrefix(prefix: string): string[] {
     return [...this.store.keys()].filter((k) => k.startsWith(prefix));
@@ -115,6 +123,9 @@ class FakeStatement {
     const s = this.sql;
     if (s.includes('SELECT * FROM works WHERE id')) {
       return (this.works.get(String(this.args[0])) as T | undefined) ?? null;
+    }
+    if (s.includes('SELECT 1 AS n FROM works WHERE id')) {
+      return this.works.has(String(this.args[0])) ? ({ n: 1 } as T) : null;
     }
     // incrementCounter — the chain budget's atomic upsert with RETURNING.
     if (s.includes('ON CONFLICT(key) DO UPDATE SET value = CAST')) {
@@ -484,6 +495,19 @@ class FakeStatement {
     if (s.includes('FROM tombstones ORDER BY')) {
       const limit = Number(this.args[0]);
       const results = [...this.db.tombstones.values()].slice(0, limit).map((t) => ({ ...t }) as T);
+      return { results };
+    }
+    if (s.includes('listed = 1 AND (listing_state')) {
+      // listInvariantViolations — the daily integrity canary.
+      const limit = Number(this.args[0]);
+      const results = [...this.works.values()]
+        .filter(
+          (w) =>
+            w.listed === 1 &&
+            (w.listing_state !== 'listed' || w.status !== 'active' || w.password_hash !== null),
+        )
+        .slice(0, limit)
+        .map((w) => ({ id: w.id }) as T);
       return { results };
     }
     throw new Error(`FakeD1 unhandled all(): ${s}`);
@@ -1144,6 +1168,42 @@ describe('scheduled purge', () => {
     expect(h.r2.store.has(`works/${fresh.id}/index.html`)).toBe(true);
     expect(h.d1.works.has(stale.id)).toBe(false);
     expect(h.r2.store.has(`works/${stale.id}/bundle.json`)).toBe(false);
+  });
+
+  it('sweeps orphaned R2 objects whose D1 row is gone, keeps real works', async () => {
+    const h = makeEnv();
+    const real = await publish(h);
+    // An orphan: R2 objects under works/{id}/ with no matching D1 row (a
+    // partial-write leftover).
+    h.r2.store.set('works/orphan00000000000000/index.html', 'stale');
+    h.r2.store.set('works/orphan00000000000000/bundle.json', '{}');
+
+    const { ctx, drain } = makeCtx();
+    await worker.scheduled({} as ScheduledController, h.env, ctx);
+    await drain();
+
+    expect(h.r2.store.has('works/orphan00000000000000/index.html')).toBe(false);
+    expect(h.r2.store.has('works/orphan00000000000000/bundle.json')).toBe(false);
+    expect(h.r2.store.has(`works/${real.id}/index.html`)).toBe(true); // real work untouched
+  });
+
+  it('the integrity canary alerts Discord when a listed work violates the invariant', async () => {
+    const h = makeEnv({ DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const w = await publish(h);
+    // Force an impossible state: listed but password-protected.
+    const row = h.d1.works.get(w.id)!;
+    row.listed = 1;
+    row.listing_state = 'listed';
+    row.password_hash = 'pbkdf2$x$y$z';
+
+    const { ctx, drain } = makeCtx();
+    await worker.scheduled({} as ScheduledController, h.env, ctx);
+    await drain();
+
+    const alerts = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .filter((c) => String(c[0]).includes('discord'));
+    expect(alerts.length).toBeGreaterThan(0);
+    expect(JSON.stringify(alerts)).toContain('integrity');
   });
 });
 
