@@ -20,7 +20,7 @@ import { randomBase64Url } from '../lib/crypto';
 import { incrementReportCount, insertReport } from '../lib/db';
 import { MAX_REPORT_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
 import { workUrl } from './publish';
-import { getActiveWork, notFoundPage } from './read';
+import { getActiveWork, notFoundPage, passwordGate } from './read';
 
 export const REPORT_REASONS = new Set(['mislabeled', 'hard-line', 'plagiarism', 'other']);
 const MAX_MESSAGE = 1000;
@@ -108,8 +108,8 @@ function sanitizeMarkdown(s: string): string {
   return s.replace(/[\\*_~`>|[\]()#@]/g, '\\$&');
 }
 
-/** POST the token to siteverify; only an explicit success passes. */
-async function verifyTurnstile(env: Env, token: string, ip: string): Promise<boolean> {
+/** POST the token to siteverify; only an explicit success passes. (Shared with the letter flow.) */
+export async function verifyTurnstile(env: Env, token: string, ip: string): Promise<boolean> {
   if (token.length === 0 || token.length > 2048) return false;
   const secretKey = env.TURNSTILE_SECRET_KEY;
   if (secretKey === undefined) return false;
@@ -203,10 +203,11 @@ export async function handleReport(request: Request, env: Env, id: string): Prom
 
 const REPORT_TS_JS = `(function(){var f=document.getElementById('report-ts');if(f)f.value=String(Date.now());})();`;
 
-const REPORT_PAGE_CSS = `
+/** Form-page styling, shared with the letter page (same design tokens). */
+export const FORM_PAGE_CSS = `
 .report-form{display:grid;gap:.8rem;margin:1.2rem 0 0}
 .report-form label{display:grid;gap:.3rem;font-size:.9rem}
-.report-form select,.report-form textarea{
+.report-form select,.report-form textarea,.report-form input[type=text]{
   font:inherit;color:var(--ink);background:var(--surface);
   border:1px solid var(--line);border-radius:8px;padding:.5rem .65rem;
 }
@@ -216,10 +217,11 @@ const REPORT_PAGE_CSS = `
 `;
 
 /**
- * CSP for this page only: the Turnstile widget needs its external script and
- * its challenge iframe. Every other page keeps the strict inline-only CSP.
+ * CSP for the Turnstile-carrying pages only (/w/:id/report, /w/:id/letter):
+ * the widget needs its external script and its challenge iframe. Every other
+ * page keeps the strict inline-only CSP.
  */
-const TURNSTILE_CSP =
+export const TURNSTILE_CSP =
   "default-src 'none'; " +
   "style-src 'unsafe-inline'; " +
   "script-src 'unsafe-inline' https://challenges.cloudflare.com; " +
@@ -236,9 +238,12 @@ const TURNSTILE_CSP =
  * Turnstile) without re-baking every published work. Old baked pages still
  * POST their inline form directly to the API — that keeps working.
  */
-export async function reportPage(env: Env, id: string): Promise<Response> {
+export async function reportPage(request: Request, env: Env, id: string): Promise<Response> {
   const row = await getActiveWork(env, id);
   if (row === null) return notFoundPage();
+  // Locked works gate their report page too — the form names the work.
+  const gate = await passwordGate(request, row, `/w/${id}/report`);
+  if (gate !== null) return gate;
   return buildReportPage(env, id, row.title, row.pen_name);
 }
 
@@ -278,7 +283,7 @@ ${widget}
 <script>${REPORT_TS_JS}</script>`;
 
   return htmlResponse(
-    pageShell({ title: 'Report — The Shelf', css: REPORT_PAGE_CSS, body, head }),
+    pageShell({ title: 'Report — The Shelf', css: FORM_PAGE_CSS, body, head }),
     200,
     withTurnstile ? { 'content-security-policy': TURNSTILE_CSP } : undefined,
   );
