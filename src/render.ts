@@ -204,7 +204,7 @@ function warningChips(warnings: WarningTag[]): string {
 function reportLink(workId: string): string {
   // The form itself lives on the live Worker page /w/:id/report so it can
   // evolve (fields, optional Turnstile) without re-baking published pages.
-  return `<p class="report"><a href="/w/${escapeHtml(workId)}/report" rel="nofollow">Report this work</a></p>`;
+  return `<a href="/w/${escapeHtml(workId)}/report" rel="nofollow">Report this work</a>`;
 }
 
 function ageGate(bundle: PublishBundleV1): string {
@@ -285,8 +285,13 @@ main{max-width:42rem;margin:0 auto;padding:0 1.25rem 4rem}
 .dlg-pov .bubble{border-left:1px solid var(--line);border-right:2px solid var(--accent)}
 .paren{font-family:var(--serif);font-style:italic;font-size:.9rem;color:var(--muted);margin:0 0 .3em}
 .dlg-text{font-family:var(--serif);font-size:1.0625rem;white-space:pre-wrap;overflow-wrap:break-word}
-.work-foot{border-top:1px solid var(--line);margin-top:3rem;padding:1.5rem 0 0;font-size:.85rem;color:var(--muted)}
-.work-foot a{color:var(--violet)}
+.work-foot{margin-top:3.5rem;padding:0 0 .75rem;text-align:center;font-family:var(--sans);font-size:.8rem;color:var(--muted)}
+.foot-mark{font-family:var(--serif);font-size:1rem;color:var(--muted);opacity:.7;margin-bottom:1.1rem}
+.foot-meta{margin:0 0 .4rem}
+.foot-links{margin:0}
+.foot-links a{color:var(--muted);text-decoration:none;border-bottom:1px solid var(--line);padding-bottom:1px;transition:color .15s,border-color .15s}
+.foot-links a:hover,.foot-links a:focus{color:var(--violet);border-color:var(--violet)}
+.foot-dot{margin:0 .65em;opacity:.6}
 .nums{font-variant-numeric:tabular-nums}
 .report{margin:1rem 0}
 .btn{
@@ -323,8 +328,12 @@ main{max-width:42rem;margin:0 auto;padding:0 1.25rem 4rem}
 .ch-back{font-family:var(--sans);font-size:.9rem;font-weight:600;text-decoration:none;color:var(--ink)}
 .ch-back:hover{color:var(--violet)}
 .ch-count{font-family:var(--sans);font-size:.85rem;color:var(--muted)}
-.ch-nav{display:flex;justify-content:space-between;gap:1rem;font-family:var(--sans);font-size:.9rem}
+.ch-nav{display:grid;grid-template-columns:1fr auto 1fr;align-items:baseline;gap:1rem;font-family:var(--sans);font-size:.9rem}
 .ch-nav a{text-decoration:none;color:var(--violet)}
+.ch-nav .nav-prev{text-align:left}
+.ch-nav .nav-toc{text-align:center;color:var(--muted);font-size:.8rem;letter-spacing:.08em;text-transform:uppercase}
+.ch-nav .nav-toc:hover,.ch-nav .nav-toc:focus{color:var(--violet)}
+.ch-nav .nav-next{text-align:right}
 .ch-nav-top{margin:.9rem 0 0}
 .ch-nav-bottom{border-top:1px solid var(--line);margin-top:3rem;padding-top:1.2rem}
 `;
@@ -374,10 +383,12 @@ ${synopsis}
 }
 
 function workFooter(bundle: PublishBundleV1, meta: PageMeta): string {
+  // Closes like a book: centered colophon under an asterism, machinery
+  // (report / attribution) whispered on one line.
   return `<footer class="work-foot">
-<p>${escapeHtml(bundle.pen_name)} · <span class="nums">${countWords(bundle).toLocaleString('en-US')}</span> words</p>
-${reportLink(meta.id)}
-<p><a href="https://inkmirror.cc" rel="noopener">Written with InkMirror</a></p>
+<div class="foot-mark" aria-hidden="true">&#8258;</div>
+<p class="foot-meta">${escapeHtml(bundle.pen_name)} &mdash; <span class="nums">${countWords(bundle).toLocaleString('en-US')}</span> words</p>
+<p class="foot-links">${reportLink(meta.id)}<span class="foot-dot" aria-hidden="true">&middot;</span><a href="https://inkmirror.cc" rel="noopener">Written with InkMirror</a></p>
 </footer>`;
 }
 
@@ -511,13 +522,14 @@ function chapterPage(
   const section = chapterSection(ch, blocksByChapter.get(ch.id) ?? [], ctx);
 
   const prev = n === 1
-    ? `<a href="/w/${id}" rel="prev">&larr; Cover</a>`
-    : `<a href="/w/${id}/${n - 1}" rel="prev">&larr; Previous</a>`;
+    ? `<a class="nav-prev" href="/w/${id}" rel="prev">&larr; Cover</a>`
+    : `<a class="nav-prev" href="/w/${id}/${n - 1}" rel="prev">&larr; Previous</a>`;
+  const contents = `<a class="nav-toc" href="/w/${id}#toc">Contents</a>`;
   const next = n === total
-    ? `<a href="/w/${id}#toc">Contents</a>`
-    : `<a href="/w/${id}/${n + 1}" rel="next">Next &rarr;</a>`;
+    ? `<span class="nav-next" aria-hidden="true"></span>`
+    : `<a class="nav-next" href="/w/${id}/${n + 1}" rel="next">Next &rarr;</a>`;
   const nav = (cls: string): string =>
-    `<nav class="ch-nav ${cls}" aria-label="Chapter navigation">${prev}${next}</nav>`;
+    `<nav class="ch-nav ${cls}" aria-label="Chapter navigation">${prev}${contents}${next}</nav>`;
 
   const head = `<header class="ch-head">
 <a class="ch-back" href="/w/${id}">${escapeHtml(bundle.title)}</a>
