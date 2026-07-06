@@ -51,12 +51,22 @@ interface FakeTombstone {
   note: string;
 }
 
+interface FakeLetter {
+  id: string;
+  work_id: string;
+  body: string;
+  contact: string;
+  created_at: string;
+}
+
 /** Understands exactly the SQL statements in src/worker/lib/db.ts. */
 class FakeD1 {
   works = new Map<string, WorkRow>();
   reports: FakeReport[] = [];
   tombstones = new Map<string, FakeTombstone>();
   settings = new Map<string, string>();
+  /** Insertion order = rowid order (oldest first), like the real table. */
+  letters: FakeLetter[] = [];
   prepare(sql: string): { bind(...args: unknown[]): FakeStatement } {
     const db = this;
     return {
@@ -179,6 +189,48 @@ class FakeStatement {
       }
       return { success: true };
     }
+    if (s.includes('UPDATE works SET password_hash')) {
+      const row = this.works.get(String(a[1]));
+      if (row) row.password_hash = a[0] === null ? null : String(a[0]);
+      return { success: true };
+    }
+    if (s.includes('UPDATE works SET letters_open')) {
+      const row = this.works.get(String(a[1]));
+      if (row) row.letters_open = Number(a[0]);
+      return { success: true };
+    }
+    if (s.includes('INSERT INTO letters')) {
+      const [id, work_id, body, contact, created_at] = a;
+      this.db.letters.push({
+        id: String(id),
+        work_id: String(work_id),
+        body: String(body),
+        contact: String(contact),
+        created_at: String(created_at),
+      });
+      return { success: true };
+    }
+    if (s.includes('DELETE FROM letters WHERE id')) {
+      const [letterId, workId] = a;
+      this.db.letters = this.db.letters.filter(
+        (l) => !(l.id === String(letterId) && l.work_id === String(workId)),
+      );
+      return { success: true };
+    }
+    if (s.includes('DELETE FROM letters') && s.includes('NOT IN')) {
+      // Eviction: keep the newest ?2 letters of the work (insertion order =
+      // rowid order breaks same-timestamp ties, like the real query).
+      const workId = String(a[0]);
+      const keep = Number(a[1]);
+      const mine = this.db.letters.filter((l) => l.work_id === workId);
+      const survivors = new Set(mine.slice(Math.max(0, mine.length - keep)).map((l) => l.id));
+      this.db.letters = this.db.letters.filter((l) => l.work_id !== workId || survivors.has(l.id));
+      return { success: true };
+    }
+    if (s.includes('DELETE FROM letters WHERE work_id')) {
+      this.db.letters = this.db.letters.filter((l) => l.work_id !== String(a[0]));
+      return { success: true };
+    }
     if (s.includes('INSERT INTO reports')) {
       const [id, work_id, reason, message, created_at] = a;
       this.db.reports.push({
@@ -252,8 +304,20 @@ class FakeStatement {
         .map((w) => ({
           id: w.id, title: w.title, pen_name: w.pen_name, rating: w.rating,
           word_count: w.word_count, views: w.views, report_count: w.report_count,
-          status: w.status, created_at: w.created_at, expires_at: w.expires_at,
+          status: w.status, password_protected: w.password_hash !== null ? 1 : 0,
+          created_at: w.created_at, expires_at: w.expires_at,
         }) as T);
+      return { results };
+    }
+    if (s.includes('FROM letters')) {
+      const workId = String(this.args[0]);
+      const limit = Number(this.args[1]);
+      // Newest first: reverse insertion order (rowid DESC breaks ties).
+      const results = this.db.letters
+        .filter((l) => l.work_id === workId)
+        .reverse()
+        .slice(0, limit)
+        .map((l) => ({ id: l.id, body: l.body, contact: l.contact, created_at: l.created_at }) as T);
       return { results };
     }
     if (s.includes('FROM reports r LEFT JOIN')) {
@@ -311,6 +375,8 @@ interface Harness {
   rlManage: FakeRateLimit;
   rlReport: FakeRateLimit;
   rlViews: FakeRateLimit;
+  rlUnlock: FakeRateLimit;
+  rlLetter: FakeRateLimit;
 }
 
 function makeEnv(overrides: Partial<Env> = {}): Harness {
@@ -320,6 +386,8 @@ function makeEnv(overrides: Partial<Env> = {}): Harness {
   const rlManage = new FakeRateLimit();
   const rlReport = new FakeRateLimit();
   const rlViews = new FakeRateLimit();
+  const rlUnlock = new FakeRateLimit();
+  const rlLetter = new FakeRateLimit();
   const env = {
     SHELF_R2: r2 as unknown as R2Bucket,
     SHELF_DB: d1 as unknown as D1Database,
@@ -327,9 +395,11 @@ function makeEnv(overrides: Partial<Env> = {}): Harness {
     RL_MANAGE: rlManage,
     RL_REPORT: rlReport,
     RL_VIEWS: rlViews,
+    RL_UNLOCK: rlUnlock,
+    RL_LETTER: rlLetter,
     ...overrides,
   } satisfies Env;
-  return { env, r2, d1, rlPublish, rlManage, rlReport, rlViews };
+  return { env, r2, d1, rlPublish, rlManage, rlReport, rlViews, rlUnlock, rlLetter };
 }
 
 function makeBundle(overrides: Partial<PublishBundleV1> = {}): PublishBundleV1 {
@@ -1293,5 +1363,516 @@ describe('GET /admin — operator console page', () => {
     expect(html).toContain('location.hash');
     expect(html).not.toContain(ADMIN_SECRET);
     expect(res.headers.get('content-security-policy')).toContain("connect-src 'self'");
+  });
+});
+
+// ---------- password tier ----------
+
+function putPassword(h: Harness, id: string, secret: string, password: string | null): Promise<Response> {
+  return dispatch(
+    h,
+    new Request(`${BASE}/api/works/${id}/password`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'x-manage-secret': secret },
+      body: JSON.stringify({ password }),
+    }),
+  );
+}
+
+function postUnlock(h: Harness, id: string, password: string, next?: string): Promise<Response> {
+  const fields: Record<string, string> = { password };
+  if (next !== undefined) fields['next'] = next;
+  return dispatch(
+    h,
+    new Request(`${BASE}/w/${id}/unlock`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(fields).toString(),
+    }),
+  );
+}
+
+/** "name=value" pair from a Set-Cookie header, ready for a Cookie header. */
+function cookiePair(res: Response): string {
+  return (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+}
+
+describe('PUT /api/works/:id/password', () => {
+  it('stores a pbkdf2 hash (never the password) and shows up in manage meta', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+    const res = await putPassword(h, id, manageSecret, 'open sesame');
+    expect(res.status).toBe(200);
+    expect((await res.json()) as Record<string, unknown>).toEqual({ ok: true, passwordProtected: true });
+
+    const stored = h.d1.works.get(id)?.password_hash ?? '';
+    expect(stored).toMatch(/^pbkdf2\$100000\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/);
+    expect(stored).not.toContain('open sesame');
+
+    const meta = await dispatch(
+      h,
+      new Request(`${BASE}/api/works/${id}`, { headers: { 'x-manage-secret': manageSecret } }),
+    );
+    expect(((await meta.json()) as Record<string, unknown>)['passwordProtected']).toBe(true);
+  });
+
+  it('rejects out-of-range and non-string passwords; null clears', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+    expect((await putPassword(h, id, manageSecret, 'abc')).status).toBe(400); // < 4
+    expect((await putPassword(h, id, manageSecret, 'x'.repeat(129))).status).toBe(400);
+    expect(
+      (
+        await dispatch(
+          h,
+          new Request(`${BASE}/api/works/${id}/password`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json', 'x-manage-secret': manageSecret },
+            body: JSON.stringify({}),
+          }),
+        )
+      ).status,
+    ).toBe(400);
+    expect(h.d1.works.get(id)?.password_hash).toBeNull();
+
+    await putPassword(h, id, manageSecret, 'valid password');
+    expect(h.d1.works.get(id)?.password_hash).not.toBeNull();
+    const cleared = await putPassword(h, id, manageSecret, null);
+    expect(cleared.status).toBe(200);
+    expect((await cleared.json()) as Record<string, unknown>).toEqual({ ok: true, passwordProtected: false });
+    expect(h.d1.works.get(id)?.password_hash).toBeNull();
+  });
+
+  it('wrong secret → the same 404 as a nonexistent work', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    expect((await putPassword(h, id, 'not-the-secret', 'whatever')).status).toBe(404);
+    expect(h.d1.works.get(id)?.password_hash).toBeNull();
+  });
+});
+
+describe('password gate on reader routes', () => {
+  it('locked cover serves the gate instead of content — and never counts a view', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+    await putPassword(h, id, manageSecret, 'open sesame');
+
+    const res = await dispatch(h, new Request(`${BASE}/w/${id}`));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    const html = await res.text();
+    expect(html).toContain('Unlock');
+    expect(html).toContain('The author shares the password personally.');
+    expect(html).toContain(`action="/w/${id}/unlock"`);
+    expect(html).toContain('A Quiet Book'); // title + pen name may show
+    expect(html).not.toContain('Two hearts, one soul.'); // prose must not
+    expect(h.d1.works.get(id)?.views).toBe(0);
+    expect(h.rlViews.keys).toHaveLength(0);
+  });
+
+  it('chapter, report, and letter pages gate too, carrying next back to the page', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h, makeBundle3());
+    await putPassword(h, id, manageSecret, 'open sesame');
+
+    for (const [path, next] of [
+      [`/w/${id}/2`, `/w/${id}/2`],
+      [`/w/${id}/report`, `/w/${id}/report`],
+      [`/w/${id}/letter`, `/w/${id}/letter`],
+    ]) {
+      const res = await dispatch(h, new Request(`${BASE}${path}`));
+      const html = await res.text();
+      expect(html, path).toContain('Unlock');
+      expect(html, path).toContain(`name="next" value="${next}"`);
+      expect(html, path).not.toContain('Second chapter prose.');
+    }
+  });
+
+  it('the manage page stays reachable without the password', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+    await putPassword(h, id, manageSecret, 'open sesame');
+    const res = await dispatch(h, new Request(`${BASE}/w/${id}/manage`));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('Manage this work');
+  });
+
+  it('admin overview rows show password_protected', async () => {
+    const h = makeEnv({ ADMIN_SECRET });
+    const { id, manageSecret } = await publish(h);
+    await putPassword(h, id, manageSecret, 'open sesame');
+    const o = (await (await adminGet(h, '/api/admin/overview')).json()) as Overview;
+    expect(o.recentWorks[0]?.['password_protected']).toBe(1);
+  });
+});
+
+describe('POST /w/:id/unlock', () => {
+  it('wrong password → gate again with a quiet error; attempt is rate-limit keyed per (ip, work)', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+    await putPassword(h, id, manageSecret, 'open sesame');
+
+    const res = await postUnlock(h, id, 'not it');
+    expect(res.status).toBe(403);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    const html = await res.text();
+    expect(html).toContain('That&#39;s not it.');
+    expect(html).toContain('Unlock'); // the gate form re-serves
+    expect(h.rlUnlock.keys[0]).toBe(`unknown:${id}`);
+  });
+
+  it('rate limit exhausted → 429 gate, password never checked', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+    await putPassword(h, id, manageSecret, 'open sesame');
+    h.rlUnlock.success = false;
+    const res = await postUnlock(h, id, 'open sesame');
+    expect(res.status).toBe(429);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(await res.text()).toContain('Too many tries');
+  });
+
+  it('correct password → 303 + scoped HttpOnly cookie; the cookie then unlocks cover and chapters, and views count', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h, makeBundle3());
+    await putPassword(h, id, manageSecret, 'open sesame');
+
+    const res = await postUnlock(h, id, 'open sesame');
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe(`/w/${id}`);
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain(`shelf_u_${id}=`);
+    expect(setCookie).toContain('HttpOnly');
+    expect(setCookie).toContain('Secure');
+    expect(setCookie).toContain('SameSite=Lax');
+    expect(setCookie).toContain(`Path=/w/${id}`);
+    expect(setCookie).toContain(`Max-Age=${30 * 24 * 60 * 60}`);
+
+    const cookie = cookiePair(res);
+    const cover = await dispatch(h, new Request(`${BASE}/w/${id}`, { headers: { cookie } }));
+    expect(cover.status).toBe(200);
+    expect(await cover.text()).toContain('class="toc"');
+    expect(cover.headers.get('cache-control')).toBe('no-store'); // locked content never shared-cached
+    expect(h.d1.works.get(id)?.views).toBe(1); // unlocked cover serve counts
+
+    const ch2 = await dispatch(h, new Request(`${BASE}/w/${id}/2`, { headers: { cookie } }));
+    expect(await ch2.text()).toContain('Second chapter prose.');
+    expect(h.d1.works.get(id)?.views).toBe(1); // chapters still never count
+  });
+
+  it('`next` returns the reader to a same-work path only', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h, makeBundle3());
+    await putPassword(h, id, manageSecret, 'open sesame');
+
+    const same = await postUnlock(h, id, 'open sesame', `/w/${id}/2`);
+    expect(same.headers.get('location')).toBe(`/w/${id}/2`);
+
+    for (const evil of [
+      '/w/BBBBBBBBBBBBBBBBBBBBBB/1', // another work
+      'https://evil.example/', // absolute URL
+      `/w/${id}extra`, // prefix-confusable id
+      '//evil.example/w/x',
+    ]) {
+      const res = await postUnlock(h, id, 'open sesame', evil);
+      expect(res.headers.get('location'), evil).toBe(`/w/${id}`);
+    }
+  });
+
+  it('changing the password invalidates every outstanding cookie; clearing opens the work', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+    await putPassword(h, id, manageSecret, 'first password');
+    const cookie = cookiePair(await postUnlock(h, id, 'first password'));
+
+    await putPassword(h, id, manageSecret, 'second password');
+    const gated = await dispatch(h, new Request(`${BASE}/w/${id}`, { headers: { cookie } }));
+    expect(await gated.text()).toContain('Unlock'); // old cookie is dead
+
+    await putPassword(h, id, manageSecret, null);
+    const open = await dispatch(h, new Request(`${BASE}/w/${id}`));
+    expect(await open.text()).toContain('Two hearts, one soul.');
+    expect(open.headers.get('cache-control')).toBe('public, max-age=300');
+  });
+
+  it('unlock on a passwordless work just redirects, no cookie; unknown work → 404', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    const res = await postUnlock(h, id, 'anything');
+    expect(res.status).toBe(303);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect((await postUnlock(h, 'BBBBBBBBBBBBBBBBBBBBBB', 'x')).status).toBe(404);
+  });
+});
+
+// ---------- letters to the author ----------
+
+const TS_OK = (): string => String(Date.now() - 5000);
+
+function formLetter(h: Harness, id: string, fields: Record<string, string>): Promise<Response> {
+  return dispatch(
+    h,
+    new Request(`${BASE}/api/works/${id}/letters`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(fields).toString(),
+    }),
+  );
+}
+
+function jsonLetter(h: Harness, id: string, fields: Record<string, unknown>): Promise<Response> {
+  return dispatch(
+    h,
+    new Request(`${BASE}/api/works/${id}/letters`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(fields),
+    }),
+  );
+}
+
+describe('POST /api/works/:id/letters', () => {
+  it('form happy path: stored in D1 with a 22-char id, styled confirmation, NO Discord forward', async () => {
+    const h = makeEnv({ DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id } = await publish(h);
+    const res = await formLetter(h, id, {
+      body: 'Your dialogue sings. Chapter two broke me.',
+      contact: 'bird@example.com',
+      website: '',
+      ts: TS_OK(),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    expect(await res.text()).toContain('on its way to the author');
+
+    expect(h.d1.letters).toHaveLength(1);
+    expect(h.d1.letters[0]?.id).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    expect(h.d1.letters[0]?.work_id).toBe(id);
+    expect(h.d1.letters[0]?.body).toBe('Your dialogue sings. Chapter two broke me.');
+    expect(h.d1.letters[0]?.contact).toBe('bird@example.com');
+    // Letters are the author's, not the operator's — Discord never rings.
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('JSON post gets a JSON response and the letter rides the RL_LETTER limit', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    const res = await jsonLetter(h, id, { body: 'Hello', contact: '', website: '', ts: Date.now() - 5000 });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { ok: boolean }).toEqual({ ok: true });
+    expect(h.d1.letters).toHaveLength(1);
+    expect(h.rlLetter.keys).toHaveLength(1);
+
+    h.rlLetter.success = false;
+    expect((await jsonLetter(h, id, { body: 'again', ts: Date.now() - 5000 })).status).toBe(429);
+  });
+
+  it('honeypot filled or too-fast submit → accepted but NOT stored', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    const hp = await formLetter(h, id, { body: 'spam', website: 'https://spam.example', ts: TS_OK() });
+    expect(hp.status).toBe(200);
+    expect(await hp.text()).toContain('on its way');
+    const fast = await formLetter(h, id, { body: 'bot', website: '', ts: String(Date.now()) });
+    expect(fast.status).toBe(200);
+    expect(h.d1.letters).toHaveLength(0);
+  });
+
+  it('enforces the body/contact caps and rejects empty letters', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    expect((await jsonLetter(h, id, { body: 'x'.repeat(4001), ts: Date.now() - 5000 })).status).toBe(400);
+    expect((await jsonLetter(h, id, { body: 'ok', contact: 'x'.repeat(201), ts: Date.now() - 5000 })).status).toBe(400);
+    expect((await jsonLetter(h, id, { body: '   ', ts: Date.now() - 5000 })).status).toBe(400);
+    expect(h.d1.letters).toHaveLength(0);
+    // At the cap is fine.
+    expect((await jsonLetter(h, id, { body: 'x'.repeat(4000), contact: 'y'.repeat(200), ts: Date.now() - 5000 })).status).toBe(200);
+    expect(h.d1.letters).toHaveLength(1);
+  });
+
+  it('letters_open = 0 → the exact 404 an unknown work produces, on page AND endpoint', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+
+    const close = await dispatch(
+      h,
+      new Request(`${BASE}/api/works/${id}/letters-open`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-manage-secret': manageSecret },
+        body: JSON.stringify({ open: false }),
+      }),
+    );
+    expect(close.status).toBe(200);
+    expect(h.d1.works.get(id)?.letters_open).toBe(0);
+
+    const page = await dispatch(h, new Request(`${BASE}/w/${id}/letter`));
+    expect(page.status).toBe(404);
+    expect(await page.text()).toContain('Nothing on this shelf'); // not "letters are closed"
+
+    const postJson = await jsonLetter(h, id, { body: 'anyone home?', ts: Date.now() - 5000 });
+    expect(postJson.status).toBe(404);
+    expect((await postJson.json()) as Record<string, unknown>).toEqual({ error: 'not_found' });
+    expect(h.d1.letters).toHaveLength(0);
+
+    // Reopen → the page serves the form again.
+    await dispatch(
+      h,
+      new Request(`${BASE}/api/works/${id}/letters-open`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-manage-secret': manageSecret },
+        body: JSON.stringify({ open: true }),
+      }),
+    );
+    expect((await dispatch(h, new Request(`${BASE}/w/${id}/letter`))).status).toBe(200);
+  });
+
+  it('per-work cap: the 502nd letter evicts the oldest two', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    for (let i = 0; i < 502; i++) {
+      const res = await jsonLetter(h, id, { body: `letter ${i}`, ts: Date.now() - 5000 });
+      expect(res.status).toBe(200);
+    }
+    expect(h.d1.letters).toHaveLength(500);
+    const bodies = h.d1.letters.map((l) => l.body);
+    expect(bodies).not.toContain('letter 0');
+    expect(bodies).not.toContain('letter 1');
+    expect(bodies[0]).toBe('letter 2');
+    expect(bodies[499]).toBe('letter 501');
+  });
+
+  it('Turnstile configured → letter POST without a valid token → 403, nothing stored', async () => {
+    const h = makeEnv({ TURNSTILE_SITE_KEY: 'sk', TURNSTILE_SECRET_KEY: 'ss' });
+    const { id } = await publish(h);
+    const res = await jsonLetter(h, id, { body: 'no token', ts: Date.now() - 5000 });
+    expect(res.status).toBe(403);
+    expect(h.d1.letters).toHaveLength(0);
+  });
+});
+
+describe('GET /w/:id/letter — live letter page', () => {
+  it('renders the form with caps, honeypot, and render-time gate', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    const res = await dispatch(h, new Request(`${BASE}/w/${id}/letter`));
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain(`action="/api/works/${id}/letters"`);
+    expect(html).toContain('name="body"');
+    expect(html).toContain('maxlength="4000"');
+    expect(html).toContain('name="contact"');
+    expect(html).toContain('maxlength="200"');
+    expect(html).toContain('name="website"'); // honeypot
+    expect(html).toContain('id="letter-ts"'); // min-render-time gate
+    expect(html).not.toContain('cf-turnstile');
+  });
+
+  it('embeds Turnstile and relaxes CSP for this page only when both keys are set', async () => {
+    const h = makeEnv({ TURNSTILE_SITE_KEY: 'site-key-1', TURNSTILE_SECRET_KEY: 'secret-key-1' });
+    const { id } = await publish(h);
+    const res = await dispatch(h, new Request(`${BASE}/w/${id}/letter`));
+    const html = await res.text();
+    expect(html).toContain('class="cf-turnstile"');
+    expect(html).toContain('data-sitekey="site-key-1"');
+    expect(res.headers.get('content-security-policy')).toContain('challenges.cloudflare.com');
+  });
+
+  it('404s for an unknown or removed work', async () => {
+    const h = makeEnv({ ADMIN_SECRET });
+    expect((await dispatch(h, new Request(`${BASE}/w/AAAAAAAAAAAAAAAAAAAAAA/letter`))).status).toBe(404);
+    const { id } = await publish(h);
+    await adminPost(h, `/api/admin/works/${id}/remove`, {});
+    expect((await dispatch(h, new Request(`${BASE}/w/${id}/letter`))).status).toBe(404);
+  });
+});
+
+describe('author inbox — GET/DELETE /api/works/:id/letters', () => {
+  it('requires the manage secret; wrong secret → 404', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    await jsonLetter(h, id, { body: 'private mail', ts: Date.now() - 5000 });
+
+    const noSecret = await dispatch(h, new Request(`${BASE}/api/works/${id}/letters`));
+    expect(noSecret.status).toBe(404);
+    const wrong = await dispatch(
+      h,
+      new Request(`${BASE}/api/works/${id}/letters`, { headers: { 'x-manage-secret': 'nope' } }),
+    );
+    expect(wrong.status).toBe(404);
+  });
+
+  it('returns lettersOpen + letters newest first', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+    await jsonLetter(h, id, { body: 'first letter', contact: '', ts: Date.now() - 5000 });
+    await jsonLetter(h, id, { body: 'second letter', contact: 'me@example.com', ts: Date.now() - 5000 });
+
+    const res = await dispatch(
+      h,
+      new Request(`${BASE}/api/works/${id}/letters`, { headers: { 'x-manage-secret': manageSecret } }),
+    );
+    expect(res.status).toBe(200);
+    const inbox = (await res.json()) as {
+      lettersOpen: boolean;
+      letters: Array<{ id: string; body: string; contact: string; created_at: string }>;
+    };
+    expect(inbox.lettersOpen).toBe(true);
+    expect(inbox.letters).toHaveLength(2);
+    expect(inbox.letters[0]?.body).toBe('second letter'); // newest first
+    expect(inbox.letters[1]?.body).toBe('first letter');
+    expect(inbox.letters[0]).not.toHaveProperty('work_id');
+  });
+
+  it('DELETE removes one letter with the secret; wrong secret leaves it', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h);
+    await jsonLetter(h, id, { body: 'keep me', ts: Date.now() - 5000 });
+    await jsonLetter(h, id, { body: 'delete me', ts: Date.now() - 5000 });
+    const target = h.d1.letters.find((l) => l.body === 'delete me');
+    expect(target).toBeDefined();
+
+    const wrong = await dispatch(
+      h,
+      new Request(`${BASE}/api/works/${id}/letters/${target?.id}`, {
+        method: 'DELETE',
+        headers: { 'x-manage-secret': 'nope' },
+      }),
+    );
+    expect(wrong.status).toBe(404);
+    expect(h.d1.letters).toHaveLength(2);
+
+    const del = await dispatch(
+      h,
+      new Request(`${BASE}/api/works/${id}/letters/${target?.id}`, {
+        method: 'DELETE',
+        headers: { 'x-manage-secret': manageSecret },
+      }),
+    );
+    expect(del.status).toBe(200);
+    expect(h.d1.letters).toHaveLength(1);
+    expect(h.d1.letters[0]?.body).toBe('keep me');
+  });
+
+  it("unpublish cascades: the work's letters evaporate with it", async () => {
+    const h = makeEnv();
+    const a = await publish(h);
+    const b = await publish(h);
+    await jsonLetter(h, a.id, { body: 'to the leaving author', ts: Date.now() - 5000 });
+    await jsonLetter(h, b.id, { body: 'to the staying author', ts: Date.now() - 5000 });
+
+    const del = await dispatch(
+      h,
+      new Request(`${BASE}/api/works/${a.id}`, { method: 'DELETE', headers: { 'x-manage-secret': a.manageSecret } }),
+    );
+    expect(del.status).toBe(200);
+    expect(h.d1.letters).toHaveLength(1);
+    expect(h.d1.letters[0]?.work_id).toBe(b.id);
+  });
+
+  it('baked pages link to the letter page in the footer', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    expect(h.r2.store.get(`works/${id}/index.html`)).toContain(`href="/w/${id}/letter"`);
+    expect(h.r2.store.get(`works/${id}/index.html`)).toContain('Write to the author');
   });
 });
