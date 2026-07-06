@@ -213,6 +213,13 @@ function reportLink(workId: string): string {
   return `<a href="/w/${escapeHtml(workId)}/report" rel="nofollow">Report this work</a>`;
 }
 
+function letterLink(workId: string): string {
+  // Live page, same pattern as the report link. Always baked in: bake time
+  // cannot know the future letters_open state, so the link is permanent and
+  // the live page simply 404s while the author's mailbox is closed.
+  return `<a href="/w/${escapeHtml(workId)}/letter" rel="nofollow">Write to the author</a>`;
+}
+
 function ageGate(bundle: PublishBundleV1): string {
   return `<div id="age-gate" class="gate">
 <div class="gate-card">
@@ -380,7 +387,7 @@ function workFooter(bundle: PublishBundleV1, meta: PageMeta): string {
   return `<footer class="work-foot">
 <div class="foot-mark" aria-hidden="true">&#8258;</div>
 <p class="foot-meta">${escapeHtml(bundle.pen_name)} &mdash; <span class="nums">${countWords(bundle).toLocaleString('en-US')}</span> words</p>
-<p class="foot-links">${reportLink(meta.id)}<span class="foot-dot" aria-hidden="true">&middot;</span><a href="https://inkmirror.cc" rel="noopener">Written with InkMirror</a></p>
+<p class="foot-links">${letterLink(meta.id)}<span class="foot-dot" aria-hidden="true">&middot;</span>${reportLink(meta.id)}<span class="foot-dot" aria-hidden="true">&middot;</span><a href="https://inkmirror.cc" rel="noopener">Written with InkMirror</a></p>
 </footer>`;
 }
 

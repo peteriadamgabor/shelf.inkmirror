@@ -319,7 +319,8 @@ describe('renderWorkPages — chaptered reading', () => {
     expect(page2).toContain(`href="/w/${META.id}/3" rel="next"`);
     expect(page2).toContain('five six');
     expect(page2).toContain(`localStorage.setItem('shelf.pos.'+"${META.id}",String(2))`);
-    // Footer identical in shape to the cover's: whole-work word count + report link.
+    // Footer identical in shape to the cover's: whole-work word count + letter + report links.
+    expect(page2).toContain(`href="/w/${META.id}/letter"`);
     expect(page2).toContain(`href="/w/${META.id}/report"`);
     expect(page2).toContain('<span class="nums">9</span> words'); // whole work incl. front matter
     // Two navs: compact top + bottom.
@@ -378,6 +379,10 @@ describe('renderWorkPage — chrome', () => {
     // baked pages only link there, so the form can evolve without re-baking.
     expect(html).toContain(`href="/w/${META.id}/report"`);
     expect(html).toContain('Report this work');
+    // The letter link is baked unconditionally — the live page 404s while
+    // the author's mailbox is closed; bake time cannot know the future state.
+    expect(html).toContain(`href="/w/${META.id}/letter"`);
+    expect(html).toContain('Write to the author');
     expect(html).not.toContain('<form');
     expect(html).toContain('prefers-reduced-motion');
   });
