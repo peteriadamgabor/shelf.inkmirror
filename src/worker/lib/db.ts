@@ -25,6 +25,9 @@ export interface WorkRow {
   expires_at: string;
   /** Set by an operator removal; NULL unless status='removed'. */
   removed_at: string | null;
+  /** Compact JSON verdict from the Phase 2 shadow chain; NULL = not run. */
+  moderation_verdict: string | null;
+  moderation_at: string | null;
 }
 
 export interface NewWork {
@@ -110,6 +113,22 @@ export async function setLettersOpen(db: D1Database, id: string, open: boolean):
 
 export async function renewWork(db: D1Database, id: string, expiresAt: string): Promise<void> {
   await db.prepare('UPDATE works SET expires_at = ?1 WHERE id = ?2').bind(expiresAt, id).run();
+}
+
+/**
+ * Store the shadow-mode moderation verdict. Deliberately a plain UPDATE: a
+ * work unpublished mid-run simply matches zero rows — silent, by design.
+ */
+export async function setModerationVerdict(
+  db: D1Database,
+  id: string,
+  verdictJson: string,
+  atIso: string,
+): Promise<void> {
+  await db
+    .prepare('UPDATE works SET moderation_verdict = ?1, moderation_at = ?2 WHERE id = ?3')
+    .bind(verdictJson, atIso, id)
+    .run();
 }
 
 export async function incrementViews(db: D1Database, id: string): Promise<void> {
@@ -227,6 +246,8 @@ export interface AdminWorkSummary {
   status: string;
   /** 0/1 — whether a password gate is set (the hash itself never leaves). */
   password_protected: number;
+  /** 'pass' | 'tag-fix' | 'hold' | 'error' — NULL when the chain hasn't run. */
+  moderation_outcome: string | null;
   created_at: string;
   expires_at: string;
 }
@@ -269,17 +290,35 @@ export async function totalViews(db: D1Database): Promise<number> {
   return row?.total ?? 0;
 }
 
+/** Pull only the outcome out of a stored verdict JSON (overview rows). */
+function verdictOutcome(raw: string | null): string | null {
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      const outcome = (parsed as Record<string, unknown>)['outcome'];
+      if (typeof outcome === 'string') return outcome;
+    }
+  } catch {
+    /* written by us, but never trust a parse */
+  }
+  return null;
+}
+
 export async function listRecentWorks(db: D1Database, limit: number): Promise<AdminWorkSummary[]> {
   const { results } = await db
     .prepare(
       `SELECT id, title, pen_name, rating, word_count, views, report_count,
               status, (password_hash IS NOT NULL) AS password_protected,
-              created_at, expires_at
+              moderation_verdict, created_at, expires_at
        FROM works ORDER BY created_at DESC LIMIT ?1`,
     )
     .bind(limit)
-    .all<AdminWorkSummary>();
-  return results;
+    .all<Omit<AdminWorkSummary, 'moderation_outcome'> & { moderation_verdict: string | null }>();
+  return results.map(({ moderation_verdict, ...rest }) => ({
+    ...rest,
+    moderation_outcome: verdictOutcome(moderation_verdict),
+  }));
 }
 
 export async function removeWork(db: D1Database, id: string, removedAt: string): Promise<void> {
