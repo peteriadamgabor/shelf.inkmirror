@@ -624,23 +624,24 @@ async function notifyDiscord(
 // ---------- entry points ----------
 
 /**
- * The waitUntil body. Never rejects: every failure collapses into an
- * {outcome:'error'} verdict, and even the verdict write is defended.
+ * Run the chain once and return the verdict. NEVER throws: every API error,
+ * timeout, or parse failure collapses into an {outcome:'error'} verdict.
+ * Shared by the shadow observer (runModerationChain) and the Phase 3 listing
+ * gate (src/worker/lib/listing.ts), which map the same verdict to different
+ * consequences.
  */
-export async function runModerationChain(
-  env: Env,
+export async function runChainVerdict(
   apiKey: string,
   bundle: PublishBundleV1,
   workId: string,
-): Promise<void> {
+): Promise<ModerationVerdict> {
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), OVERALL_TIMEOUT_MS);
-  let verdict: ModerationVerdict;
   try {
-    verdict = await moderate(apiKey, bundle, workId, controller.signal, started);
+    return await moderate(apiKey, bundle, workId, controller.signal, started);
   } catch (e) {
-    verdict = {
+    return {
       outcome: 'error',
       truncated: false,
       flaggedChunks: 0,
@@ -651,6 +652,19 @@ export async function runModerationChain(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * The waitUntil body. Never rejects: every failure collapses into an
+ * {outcome:'error'} verdict, and even the verdict write is defended.
+ */
+export async function runModerationChain(
+  env: Env,
+  apiKey: string,
+  bundle: PublishBundleV1,
+  workId: string,
+): Promise<void> {
+  const verdict = await runChainVerdict(apiKey, bundle, workId);
 
   try {
     // Silently a no-op when the work was unpublished mid-run — the UPDATE
