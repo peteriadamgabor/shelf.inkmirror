@@ -3488,3 +3488,42 @@ describe('admin overview — chain budget visibility', () => {
     expect(o.chainBudget).toEqual({ cap: 100, usedToday: 0 });
   });
 });
+
+describe('server-side crash reporting (GlitchTip)', () => {
+  const DSN = 'https://pubkey123@glitchtip.example.com/7';
+
+  it('reports an exception as a Sentry envelope with the NetBird auth header', async () => {
+    const { reportException } = await import('./worker/lib/glitchtip');
+    const env = {
+      GLITCHTIP_DSN: DSN,
+      GLITCHTIP_PROXY_AUTH_VALUE: 'netbird-secret',
+    } as unknown as import('./worker/lib/env').Env;
+    const req = new Request(`${BASE}/api/works/wLBzGbzG8TQNhyXftFOz5g/report`, { method: 'POST' });
+    await reportException(env, new Error('boom in report'), req);
+
+    const call = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.at(-1);
+    expect(String(call?.[0])).toContain('glitchtip.example.com/api/7/envelope/');
+    const init = call?.[1] as { headers: Record<string, string>; body: string };
+    expect(init.headers['X-NetBird-Auth']).toBe('netbird-secret');
+    expect(init.body).toContain('boom in report');
+    // Route shape, not the raw capability id.
+    expect(init.body).toContain('/works/:id/report');
+    expect(init.body).not.toContain('wLBzGbzG8TQNhyXftFOz5g');
+  });
+
+  it('is dormant when GLITCHTIP_DSN is unset (no fetch)', async () => {
+    const { reportException } = await import('./worker/lib/glitchtip');
+    const env = {} as unknown as import('./worker/lib/env').Env;
+    await reportException(env, new Error('x'), new Request(`${BASE}/`));
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('never throws even if the ingest POST fails', async () => {
+    (fetch as unknown as { mockRejectedValueOnce: (e: unknown) => void }).mockRejectedValueOnce(
+      new Error('network down'),
+    );
+    const { reportException } = await import('./worker/lib/glitchtip');
+    const env = { GLITCHTIP_DSN: DSN } as unknown as import('./worker/lib/env').Env;
+    await expect(reportException(env, new Error('y'), new Request(`${BASE}/`))).resolves.toBeUndefined();
+  });
+});

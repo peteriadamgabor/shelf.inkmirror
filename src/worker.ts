@@ -34,6 +34,7 @@
 import type { Env } from './worker/lib/env';
 import { WORK_ID_RE, preflightResponse, withCors } from './worker/lib/http';
 import { deleteWorkObjects, listWorkIds } from './worker/lib/bake';
+import { reportException } from './worker/lib/glitchtip';
 import { deleteWork, listExpired, listInvariantViolations, listRemovedBefore, workExists } from './worker/lib/db';
 import { handlePublish } from './worker/routes/publish';
 import { handleManage } from './worker/routes/manage';
@@ -96,13 +97,30 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
-    const res = await route(request, env, ctx, url, path, method);
-    const withHeaders = withBaseHeaders(res, INDEXABLE_PATHS.has(path));
-    return path.startsWith('/api/') ? withCors(request, withHeaders) : withHeaders;
+    try {
+      const res = await route(request, env, ctx, url, path, method);
+      const withHeaders = withBaseHeaders(res, INDEXABLE_PATHS.has(path));
+      return path.startsWith('/api/') ? withCors(request, withHeaders) : withHeaders;
+    } catch (e) {
+      // An uncaught handler exception is reported server-side (never from a
+      // reader's browser) and answered with a clean, opaque 500.
+      ctx.waitUntil(reportException(env, e, request));
+      console.error(`[worker] uncaught ${method} ${path}: ${e instanceof Error ? e.message : String(e)}`);
+      const body = path.startsWith('/api/')
+        ? JSON.stringify({ error: 'internal_error' })
+        : 'Something went wrong.';
+      const ct = path.startsWith('/api/') ? 'application/json' : 'text/plain; charset=utf-8';
+      return withBaseHeaders(new Response(body, { status: 500, headers: { 'content-type': ct } }), false);
+    }
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(dailyMaintenance(env));
+    ctx.waitUntil(
+      dailyMaintenance(env).catch((e) => {
+        ctx.waitUntil(reportException(env, e, new Request('https://shelf.inkmirror.cc/__cron')));
+        console.error(`[cron] failed: ${e instanceof Error ? e.message : String(e)}`);
+      }),
+    );
   },
 } satisfies ExportedHandler<Env>;
 

@@ -38,4 +38,16 @@ export interface Env {
    */
   TURNSTILE_SITE_KEY?: string;
   TURNSTILE_SECRET_KEY?: string;
+  /**
+   * Server-side crash reporting to the self-hosted GlitchTip (same instance
+   * InkMirror uses). The Worker reports its OWN uncaught exceptions —
+   * reader browsers are never instrumented (privacy). Unset = no reporting.
+   * DSN is the shelf's own GlitchTip project; the NetBird auth value is
+   * shared with InkMirror's tunnel. All Wrangler Secrets.
+   */
+  GLITCHTIP_DSN?: string;
+  /** NetBird proxy auth value guarding the GlitchTip host. */
+  GLITCHTIP_PROXY_AUTH_VALUE?: string;
+  /** Header name for the NetBird secret; defaults to `X-NetBird-Auth`. */
+  GLITCHTIP_PROXY_AUTH_HEADER?: string;
 }

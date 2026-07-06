@@ -92,4 +92,8 @@
 	//                            unset = the whole admin surface answers 404
 	//   TURNSTILE_SITE_KEY     — optional Turnstile on /w/:id/report; BOTH
 	//   TURNSTILE_SECRET_KEY     must be set to enable widget + verification
+	//   GLITCHTIP_DSN          — server-side crash reporting (Worker exceptions
+	//                            only; readers never instrumented). Unset = off.
+	//   GLITCHTIP_PROXY_AUTH_VALUE — NetBird auth value guarding GlitchTip
+	//                            (shared with InkMirror's tunnel)
 }
