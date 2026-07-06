@@ -37,6 +37,7 @@ import {
   upsertTombstone,
   type WorkRow,
 } from '../lib/db';
+import { parseModerationVerdict } from '../lib/moderation';
 import { WORK_ID_RE, clientIp, jsonError, readBodyCapped } from '../lib/http';
 import { PAUSED_KEY } from './publish';
 import { notFoundPage } from './read';
@@ -140,8 +141,12 @@ async function workDetail(env: Env, row: WorkRow): Promise<Response> {
   const reports = await listReportsForWork(env.SHELF_DB, row.id, 100);
   // The manage-secret hash (and any future password hash) is the author's
   // capability material — the operator has no use for it, so it never leaves.
-  const { secret_hash: _sh, password_hash: _ph, ...safe } = row;
-  return Response.json({ work: safe, reports });
+  // The raw verdict JSON string is replaced by its parsed form.
+  const { secret_hash: _sh, password_hash: _ph, moderation_verdict, ...safe } = row;
+  return Response.json({
+    work: { ...safe, moderation: parseModerationVerdict(moderation_verdict) },
+    reports,
+  });
 }
 
 async function remove(request: Request, env: Env, row: WorkRow): Promise<Response> {

@@ -32,6 +32,10 @@ const ADMIN_CSS = `
 .tag-removed{color:var(--ember);border-color:color-mix(in srgb,var(--ember) 45%,transparent)}
 .tag-held{color:var(--amber)}
 .tag-reports{color:var(--ember);font-weight:700}
+.tag-mod-hold{color:var(--ember);border-color:color-mix(in srgb,var(--ember) 45%,transparent)}
+.tag-mod-tag-fix{color:var(--amber)}
+.tag-mod-pass{color:var(--muted)}
+.tag-mod-error{color:var(--muted);font-style:italic}
 .acts{display:flex;flex-wrap:wrap;gap:.45rem;align-items:center}
 .btn-sm{font:600 .78rem/1 var(--sans);padding:.45rem .7rem;border-radius:8px;cursor:pointer;
   border:1px solid var(--line);background:var(--surface);color:var(--ink)}
@@ -158,6 +162,7 @@ function workCard(w){
   var meta=el('div','wmeta');
   var rt=el('span','tag tag-'+w.rating,w.rating);meta.appendChild(rt);
   if(w.status!=='active')meta.appendChild(el('span','tag tag-'+w.status,w.status));
+  if(w.moderation_outcome)meta.appendChild(el('span','tag tag-mod-'+w.moderation_outcome,'mod: '+w.moderation_outcome));
   if(w.password_protected)meta.appendChild(el('span','tag','locked'));
   meta.appendChild(el('span',null,'by '+w.pen_name));
   meta.appendChild(el('span','nums',Number(w.word_count).toLocaleString()+' words'));
