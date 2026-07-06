@@ -158,6 +158,7 @@ function workCard(w){
   var meta=el('div','wmeta');
   var rt=el('span','tag tag-'+w.rating,w.rating);meta.appendChild(rt);
   if(w.status!=='active')meta.appendChild(el('span','tag tag-'+w.status,w.status));
+  if(w.password_protected)meta.appendChild(el('span','tag','locked'));
   meta.appendChild(el('span',null,'by '+w.pen_name));
   meta.appendChild(el('span','nums',Number(w.word_count).toLocaleString()+' words'));
   meta.appendChild(el('span','nums',w.views+' opens'));

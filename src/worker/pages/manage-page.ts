@@ -5,6 +5,10 @@
  * never reaches server logs); inline JS reads it and talks to the API with
  * the X-Manage-Secret header. The page itself is static and identical for
  * every caller — it leaks nothing about whether the work exists.
+ *
+ * Sections: work meta + lifecycle actions · Password (set/change/remove the
+ * reading password) · Letters (open/close the mailbox, read + delete the
+ * inbox). All user-controlled strings are inserted via textContent.
  */
 
 import { escapeHtml, htmlResponse, pageShell } from '../../html';
@@ -16,6 +20,20 @@ const MANAGE_CSS = `
 .actions{display:flex;gap:.6rem;flex-wrap:wrap;margin-top:1.4rem}
 .status{min-height:1.4rem;font-size:.85rem;color:var(--muted);margin-top:.8rem}
 .work-link{word-break:break-all;font-size:.9rem}
+.field-row{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;margin:.8rem 0 0}
+.field-row input[type=password]{
+  font:inherit;color:var(--ink);background:var(--surface);
+  border:1px solid var(--line);border-radius:10px;padding:.55rem .7rem;
+  flex:1;min-width:12rem;
+}
+.section-note{font-size:.85rem;color:var(--muted);margin:.8rem 0 0}
+.lcard{border:1px solid var(--line);border-radius:10px;padding:.7rem .9rem;margin:.6rem 0}
+.lmeta{display:flex;flex-wrap:wrap;gap:.3rem .9rem;color:var(--muted);font-size:.8rem;margin:0 0 .3rem}
+.lbody{font-family:var(--serif);font-size:.95rem;white-space:pre-wrap;overflow-wrap:break-word;margin:0 0 .5rem}
+.btn-sm{font:600 .78rem/1 var(--sans);padding:.4rem .65rem;border-radius:8px;cursor:pointer;
+  border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+.btn-sm.danger{color:var(--ember);border-color:color-mix(in srgb,var(--ember) 45%,transparent)}
+.empty{color:var(--muted);font-size:.9rem;margin:.8rem 0 0}
 `;
 
 export function managePage(id: string): Response {
@@ -49,6 +67,30 @@ the secret after the <code>#</code> stays in your browser and is never sent in a
 <p class="status" id="status"></p>
 </div>
 
+<div class="card" id="pw-card" hidden>
+<h2 style="margin-top:0">Password</h2>
+<p class="muted" id="pw-status"></p>
+<div class="field-row">
+<input type="password" id="pw-input" maxlength="128" placeholder="4&ndash;128 characters" autocomplete="new-password">
+<button class="btn" id="btn-pw-save" type="button">Set password</button>
+</div>
+<div class="actions">
+<button class="btn btn-danger" id="btn-pw-remove" type="button" hidden>Remove password</button>
+</div>
+<p class="section-note">Changing or removing the password signs every reader out.</p>
+<p class="status" id="pw-note"></p>
+</div>
+
+<div class="card" id="lt-card" hidden>
+<h2 style="margin-top:0">Letters</h2>
+<p class="muted" id="lt-status"></p>
+<div class="actions" style="margin-top:.8rem">
+<button class="btn" id="btn-lt-toggle" type="button"></button>
+</div>
+<div id="lt-list"></div>
+<p class="status" id="lt-note"></p>
+</div>
+
 <p class="muted small"><a href="/">The Shelf</a> · <a href="/rules">House rules</a></p>
 </div>
 <script>
@@ -56,19 +98,63 @@ the secret after the <code>#</code> stays in your browser and is never sent in a
 'use strict';
 var ID='${safeId}';
 var secret=location.hash.length>1?location.hash.slice(1):'';
+var pwProtected=false;
+var lettersOpen=true;
 function $(x){return document.getElementById(x);}
+function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;}
 function fmt(iso){
   var d=new Date(iso);
   return isNaN(d.getTime())?iso:d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});
 }
-function fail(msg){$('err-text').textContent=msg;$('error').hidden=false;$('panel').hidden=true;$('loading').hidden=true;}
+function fail(msg){$('err-text').textContent=msg;$('error').hidden=false;$('panel').hidden=true;$('pw-card').hidden=true;$('lt-card').hidden=true;$('loading').hidden=true;}
 function note(msg){$('status').textContent=msg;}
-function api(path,method){
-  return fetch(path,{method:method||'GET',headers:{'X-Manage-Secret':secret}}).then(function(r){
+function pwNote(msg){$('pw-note').textContent=msg;}
+function ltNote(msg){$('lt-note').textContent=msg;}
+function api(path,method,body){
+  var opts={method:method||'GET',headers:{'X-Manage-Secret':secret}};
+  if(body!==undefined){opts.headers['content-type']='application/json';opts.body=JSON.stringify(body);}
+  return fetch(path,opts).then(function(r){
     if(r.status===404)throw new Error('That secret does not open this work. Check that you used the complete manage link.');
     if(r.status===429)throw new Error('Too many requests — wait a minute and try again.');
     if(!r.ok)throw new Error('Something went wrong ('+r.status+'). Try again in a moment.');
     return r.json();
+  });
+}
+function renderPw(){
+  $('pw-status').textContent=pwProtected
+    ?'Locked — readers need the password you share with them personally.'
+    :'Open — anyone with the link can read.';
+  $('btn-pw-save').textContent=pwProtected?'Change password':'Set password';
+  $('btn-pw-remove').hidden=!pwProtected;
+}
+function renderLetters(letters){
+  $('lt-status').textContent=lettersOpen
+    ?"Accepting letters — readers can write to you from the work's pages."
+    :'Closed — the letter page answers as if it never existed.';
+  $('btn-lt-toggle').textContent=lettersOpen?'Close letters':'Accept letters';
+  var box=$('lt-list');box.textContent='';
+  if(letters.length===0){box.appendChild(el('p','empty','No letters yet.'));return;}
+  letters.forEach(function(l){
+    var c=el('div','lcard');
+    var meta=el('div','lmeta');
+    meta.appendChild(el('span',null,fmt(l.created_at)));
+    if(l.contact)meta.appendChild(el('span',null,'answer: '+l.contact));
+    c.appendChild(meta);
+    c.appendChild(el('p','lbody',l.body));
+    var del=el('button','btn-sm danger','Delete');del.type='button';
+    del.addEventListener('click',function(){
+      if(!confirm('Delete this letter? It cannot be recovered.'))return;
+      api('/api/works/'+ID+'/letters/'+l.id,'DELETE').then(function(){
+        ltNote('Letter deleted.');return loadLetters();
+      }).catch(function(e){ltNote(e.message);});
+    });
+    c.appendChild(del);
+    box.appendChild(c);
+  });
+}
+function loadLetters(){
+  return api('/api/works/'+ID+'/letters').then(function(r){
+    lettersOpen=r.lettersOpen;renderLetters(r.letters||[]);
   });
 }
 if(!secret){fail('The manage link is incomplete: the secret after the # is missing. Use the full link you saved when you published.');return;}
@@ -79,7 +165,9 @@ api('/api/works/'+ID).then(function(m){
   $('m-created').textContent=fmt(m.created_at);
   $('m-updated').textContent=fmt(m.updated_at);
   $('m-expires').textContent=fmt(m.expires_at);
-  $('loading').hidden=true;$('panel').hidden=false;
+  pwProtected=m.passwordProtected===true;renderPw();
+  $('loading').hidden=true;$('panel').hidden=false;$('pw-card').hidden=false;$('lt-card').hidden=false;
+  loadLetters().catch(function(e){ltNote(e.message);});
 }).catch(function(e){fail(e.message);});
 $('btn-copy').addEventListener('click',function(){
   var url=$('m-link').href;
@@ -96,10 +184,33 @@ $('btn-renew').addEventListener('click',function(){
 $('btn-delete').addEventListener('click',function(){
   if(!confirm('Unpublish this work? The reading link stops working immediately. This cannot be undone.'))return;
   api('/api/works/'+ID,'DELETE').then(function(){
-    $('panel').hidden=true;
+    $('panel').hidden=true;$('pw-card').hidden=true;$('lt-card').hidden=true;
     fail('This work has been unpublished. Readers with the link now see an empty shelf.');
     $('error').querySelector('h2').textContent='Unpublished';
   }).catch(function(e){note(e.message);});
+});
+$('btn-pw-save').addEventListener('click',function(){
+  var v=$('pw-input').value;
+  if(v.length<4||v.length>128){pwNote('The password must be 4–128 characters.');return;}
+  api('/api/works/'+ID+'/password','PUT',{password:v}).then(function(){
+    pwProtected=true;renderPw();$('pw-input').value='';
+    pwNote('Password saved. Every reader must unlock again with the new password.');
+  }).catch(function(e){pwNote(e.message);});
+});
+$('btn-pw-remove').addEventListener('click',function(){
+  if(!confirm('Remove the password? Anyone with the link can read again.'))return;
+  api('/api/works/'+ID+'/password','PUT',{password:null}).then(function(){
+    pwProtected=false;renderPw();
+    pwNote('Password removed — the work is open to anyone with the link.');
+  }).catch(function(e){pwNote(e.message);});
+});
+$('btn-lt-toggle').addEventListener('click',function(){
+  var target=!lettersOpen;
+  api('/api/works/'+ID+'/letters-open','PUT',{open:target}).then(function(){
+    lettersOpen=target;
+    ltNote(target?'Letters are open again.':'Letters closed — the letter page now shows nothing.');
+    return loadLetters();
+  }).catch(function(e){ltNote(e.message);});
 });
 })();
 </script>`;
