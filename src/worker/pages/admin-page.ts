@@ -36,6 +36,14 @@ const ADMIN_CSS = `
 .tag-mod-tag-fix{color:var(--amber)}
 .tag-mod-pass{color:var(--muted)}
 .tag-mod-error{color:var(--muted);font-style:italic}
+.tag-shelf-listed{color:var(--violet);border-color:color-mix(in srgb,var(--violet) 45%,transparent)}
+.tag-shelf-pending{color:var(--muted)}
+.tag-shelf-held{color:var(--ember);border-color:color-mix(in srgb,var(--ember) 45%,transparent)}
+.tag-shelf-refused{color:var(--amber)}
+.hcard{background:var(--surface);border:1px solid color-mix(in srgb,var(--ember) 45%,transparent);
+  border-radius:12px;padding:1rem 1.1rem;margin:.7rem 0;display:flex;flex-wrap:wrap;
+  justify-content:space-between;gap:.6rem 1rem;align-items:baseline}
+.hcard .hmeta{color:var(--muted);font-size:.82rem;margin:.25rem 0 0}
 .acts{display:flex;flex-wrap:wrap;gap:.45rem;align-items:center}
 .btn-sm{font:600 .78rem/1 var(--sans);padding:.45rem .7rem;border-radius:8px;cursor:pointer;
   border:1px solid var(--line);background:var(--surface);color:var(--ink)}
@@ -87,6 +95,12 @@ The secret stays in this tab&#39;s memory and travels only as a header.</p>
 <button class="btn-sm" id="btn-refresh" type="button">Refresh</button>
 </div>
 <p class="status" id="status"></p>
+
+<div id="held-section" hidden>
+<h2>Needs decision</h2>
+<p class="muted small">Listing requests waiting on a human. The works stay readable by link — nothing is listed until you decide.</p>
+<div id="held"></div>
+</div>
 
 <h2>Recent works</h2>
 <div id="works"></div>
@@ -142,9 +156,44 @@ function render(o){
   pairs.forEach(function(p){
     var s=el('div','stat');s.appendChild(el('div','v nums',String(p[1])));s.appendChild(el('div','k',p[0]));stats.appendChild(s);
   });
+  renderHeld(o.heldListings||[]);
   renderWorks(o.recentWorks||[]);
   renderReports(o.recentReports||[]);
   renderTombstones(o.tombstones||[]);
+}
+function heldReasonText(l){
+  if(!l||!l.reason)return 'needs review';
+  if(l.reason==='manual')return 'manual review — the gate has no API key';
+  if(l.reason==='review')return 'hard-line suspicion from the chain';
+  if(l.reason==='error')return 'the moderation chain failed — fail-safe hold';
+  return l.reason;
+}
+function renderHeld(list){
+  $('held-section').hidden=list.length===0;
+  var box=$('held');box.textContent='';
+  list.forEach(function(w){
+    var c=el('div','hcard');
+    var left=el('div');
+    var t=el('p','wtitle');
+    var link=el('a',null,w.title);link.href='/w/'+w.id;link.target='_blank';link.rel='noopener';
+    t.appendChild(link);
+    left.appendChild(t);
+    left.appendChild(el('p','hmeta','by '+w.pen_name+' · rated '+w.rating+' · '+heldReasonText(w.listing)));
+    c.appendChild(left);
+    var acts=el('div','acts');
+    var approve=el('button','btn-sm','Approve — list it');approve.type='button';
+    approve.addEventListener('click',function(){
+      act(api('/api/admin/works/'+w.id+'/listing','POST',{action:'approve'}),'Listed "'+w.title+'" on the shelf.');
+    });
+    var deny=el('button','btn-sm','Deny');deny.type='button';
+    deny.addEventListener('click',function(){
+      if(!confirm('Deny the listing of "'+w.title+'"? The author sees an operator refusal; the link keeps working.'))return;
+      act(api('/api/admin/works/'+w.id+'/listing','POST',{action:'deny'}),'Denied the listing of "'+w.title+'".');
+    });
+    acts.appendChild(approve);acts.appendChild(deny);
+    c.appendChild(acts);
+    box.appendChild(c);
+  });
 }
 function renderWorks(list){
   var box=$('works');box.textContent='';
@@ -163,6 +212,7 @@ function workCard(w){
   var rt=el('span','tag tag-'+w.rating,w.rating);meta.appendChild(rt);
   if(w.status!=='active')meta.appendChild(el('span','tag tag-'+w.status,w.status));
   if(w.moderation_outcome)meta.appendChild(el('span','tag tag-mod-'+w.moderation_outcome,'mod: '+w.moderation_outcome));
+  if(w.listing_state)meta.appendChild(el('span','tag tag-shelf-'+w.listing_state,'shelf: '+w.listing_state));
   if(w.password_protected)meta.appendChild(el('span','tag','locked'));
   meta.appendChild(el('span',null,'by '+w.pen_name));
   meta.appendChild(el('span','nums',Number(w.word_count).toLocaleString()+' words'));

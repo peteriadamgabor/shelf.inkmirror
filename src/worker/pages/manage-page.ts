@@ -6,9 +6,11 @@
  * the X-Manage-Secret header. The page itself is static and identical for
  * every caller — it leaks nothing about whether the work exists.
  *
- * Sections: work meta + lifecycle actions · Password (set/change/remove the
- * reading password) · Letters (open/close the mailbox, read + delete the
- * inbox). All user-controlled strings are inserted via textContent.
+ * Sections: work meta + lifecycle actions · The Shelf (listing lifecycle:
+ * request / delist / accept-suggested-labels-and-retry) · Password
+ * (set/change/remove the reading password) · Letters (open/close the
+ * mailbox, read + delete the inbox). All user-controlled strings are
+ * inserted via textContent.
  */
 
 import { escapeHtml, htmlResponse, pageShell } from '../../html';
@@ -67,6 +69,19 @@ the secret after the <code>#</code> stays in your browser and is never sent in a
 <p class="status" id="status"></p>
 </div>
 
+<div class="card" id="sh-card" hidden>
+<h2 style="margin-top:0">The Shelf</h2>
+<p class="muted" id="sh-status"></p>
+<p class="section-note" id="sh-verdict" hidden></p>
+<div class="actions">
+<button class="btn" id="btn-sh-toggle" type="button"></button>
+<button class="btn btn-primary" id="btn-sh-accept" type="button" hidden>Accept suggested labels &amp; retry</button>
+</div>
+<p class="section-note">Listing is public and passes a moderation review; works stay readable by link either way.
+Listed works don&#39;t expire while listed.</p>
+<p class="status" id="sh-note"></p>
+</div>
+
 <div class="card" id="pw-card" hidden>
 <h2 style="margin-top:0">Password</h2>
 <p class="muted" id="pw-status"></p>
@@ -100,25 +115,63 @@ var ID='${safeId}';
 var secret=location.hash.length>1?location.hash.slice(1):'';
 var pwProtected=false;
 var lettersOpen=true;
+var listingState=null;
+var listingVerdict=null;
+var listedAt=null;
 function $(x){return document.getElementById(x);}
 function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;}
 function fmt(iso){
   var d=new Date(iso);
   return isNaN(d.getTime())?iso:d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});
 }
-function fail(msg){$('err-text').textContent=msg;$('error').hidden=false;$('panel').hidden=true;$('pw-card').hidden=true;$('lt-card').hidden=true;$('loading').hidden=true;}
+function fail(msg){$('err-text').textContent=msg;$('error').hidden=false;$('panel').hidden=true;$('sh-card').hidden=true;$('pw-card').hidden=true;$('lt-card').hidden=true;$('loading').hidden=true;}
 function note(msg){$('status').textContent=msg;}
 function pwNote(msg){$('pw-note').textContent=msg;}
 function ltNote(msg){$('lt-note').textContent=msg;}
+function shNote(msg){$('sh-note').textContent=msg;}
 function api(path,method,body){
   var opts={method:method||'GET',headers:{'X-Manage-Secret':secret}};
   if(body!==undefined){opts.headers['content-type']='application/json';opts.body=JSON.stringify(body);}
   return fetch(path,opts).then(function(r){
     if(r.status===404)throw new Error('That secret does not open this work. Check that you used the complete manage link.');
     if(r.status===429)throw new Error('Too many requests — wait a minute and try again.');
-    if(!r.ok)throw new Error('Something went wrong ('+r.status+'). Try again in a moment.');
+    if(!r.ok)return r.json().catch(function(){throw new Error('Something went wrong ('+r.status+'). Try again in a moment.');}).then(function(b){
+      var err=new Error('Something went wrong ('+r.status+'). Try again in a moment.');
+      err.code=b&&b.error;throw err;
+    });
     return r.json();
   });
+}
+function renderShelf(){
+  var s=$('sh-status'),v=$('sh-verdict'),btn=$('btn-sh-toggle'),accept=$('btn-sh-accept');
+  v.hidden=true;v.textContent='';accept.hidden=true;
+  if(listingState==='listed'){
+    s.textContent='Listed since '+fmt(listedAt)+' — visible on the public shelf, exempt from expiry.';
+    btn.textContent='Delist from the Shelf';
+  }else if(listingState==='pending'){
+    s.textContent='Pending — the listing review is running. Check back in a minute.';
+    btn.textContent='Withdraw listing request';
+  }else if(listingState==='held'){
+    s.textContent='Held — a human is reviewing this listing. The work stays readable by link meanwhile.';
+    btn.textContent='Withdraw listing request';
+  }else if(listingState==='refused'){
+    btn.textContent='Request listing again';
+    if(listingVerdict&&listingVerdict.reason==='labels'){
+      s.textContent='Refused — the review found the declared labels don\\'t cover the content.';
+      if(listingVerdict.suggested){
+        var sug=listingVerdict.suggested;
+        v.textContent='Suggested labels: '+sug.rating+(sug.warnings&&sug.warnings.length?' — '+sug.warnings.join(', '):' — no warnings');
+        v.hidden=false;accept.hidden=false;
+      }
+    }else if(listingVerdict&&listingVerdict.reason==='operator'){
+      s.textContent='Refused by the operator. You can fix the work and request again, or ask via a report reply.';
+    }else{
+      s.textContent='Refused.';
+    }
+  }else{
+    s.textContent='Not listed — this work is reachable only by its link.';
+    btn.textContent='List on the Shelf';
+  }
 }
 function renderPw(){
   $('pw-status').textContent=pwProtected
@@ -166,7 +219,8 @@ api('/api/works/'+ID).then(function(m){
   $('m-updated').textContent=fmt(m.updated_at);
   $('m-expires').textContent=fmt(m.expires_at);
   pwProtected=m.passwordProtected===true;renderPw();
-  $('loading').hidden=true;$('panel').hidden=false;$('pw-card').hidden=false;$('lt-card').hidden=false;
+  listingState=m.listingState||null;listingVerdict=m.listingVerdict||null;listedAt=m.listedAt||null;renderShelf();
+  $('loading').hidden=true;$('panel').hidden=false;$('sh-card').hidden=false;$('pw-card').hidden=false;$('lt-card').hidden=false;
   loadLetters().catch(function(e){ltNote(e.message);});
 }).catch(function(e){fail(e.message);});
 $('btn-copy').addEventListener('click',function(){
@@ -184,10 +238,50 @@ $('btn-renew').addEventListener('click',function(){
 $('btn-delete').addEventListener('click',function(){
   if(!confirm('Unpublish this work? The reading link stops working immediately. This cannot be undone.'))return;
   api('/api/works/'+ID,'DELETE').then(function(){
-    $('panel').hidden=true;$('pw-card').hidden=true;$('lt-card').hidden=true;
+    $('panel').hidden=true;$('sh-card').hidden=true;$('pw-card').hidden=true;$('lt-card').hidden=true;
     fail('This work has been unpublished. Readers with the link now see an empty shelf.');
     $('error').querySelector('h2').textContent='Unpublished';
   }).catch(function(e){note(e.message);});
+});
+$('btn-sh-toggle').addEventListener('click',function(){
+  if(listingState===null){
+    // Request a listing — the gate answers in the background.
+    api('/api/works/'+ID+'/listing','PUT',{list:true}).then(function(r){
+      listingState=r.listingState||null;renderShelf();
+      shNote('Listing requested — the review usually takes under a minute.');
+    }).catch(function(e){
+      if(e.code==='password_locked'){shNote('A password-locked work cannot be listed publicly. Remove the password first.');}
+      else{shNote(e.message);}
+    });
+  }else if(listingState==='refused'){
+    api('/api/works/'+ID+'/listing','PUT',{list:true}).then(function(r){
+      listingState=r.listingState||null;listingVerdict=null;renderShelf();
+      shNote('Listing requested again.');
+    }).catch(function(e){
+      if(e.code==='password_locked'){shNote('A password-locked work cannot be listed publicly. Remove the password first.');}
+      else{shNote(e.message);}
+    });
+  }else{
+    var msg=listingState==='listed'
+      ?'Delist this work? It disappears from the public shelf immediately (the reading link keeps working) and expiry applies again.'
+      :'Withdraw the listing request?';
+    if(!confirm(msg))return;
+    api('/api/works/'+ID+'/listing','PUT',{list:false}).then(function(){
+      listingState=null;listingVerdict=null;listedAt=null;renderShelf();
+      shNote('Not listed anymore.');
+    }).catch(function(e){shNote(e.message);});
+  }
+});
+$('btn-sh-accept').addEventListener('click',function(){
+  if(!(listingVerdict&&listingVerdict.suggested))return;
+  var sug=listingVerdict.suggested;
+  if(!confirm('Re-label this work as '+sug.rating+(sug.warnings&&sug.warnings.length?' ['+sug.warnings.join(', ')+']':'')+' and request the listing again? The reading pages are re-baked with the new labels.'))return;
+  api('/api/works/'+ID+'/labels','PUT',{rating:sug.rating,warnings:sug.warnings||[]}).then(function(){
+    return api('/api/works/'+ID+'/listing','PUT',{list:true});
+  }).then(function(r){
+    listingState=r.listingState||null;listingVerdict=null;renderShelf();
+    shNote('Labels updated and listing requested again.');
+  }).catch(function(e){shNote(e.message);});
 });
 $('btn-pw-save').addEventListener('click',function(){
   var v=$('pw-input').value;

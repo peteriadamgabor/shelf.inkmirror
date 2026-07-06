@@ -57,10 +57,12 @@ export function landingPage(): Response {
 <p class="tagline">The reading room next door to <a href="https://inkmirror.cc" rel="noopener">InkMirror</a>.</p>
 <p class="sub">Writers publish a draft or a finished work by explicit choice and share it by
 unlisted link — no accounts, no feeds, no algorithm. Works are labeled honestly,
-read quietly, and expire after 30 days unless their author renews them.</p>
+read quietly, and expire after 30 days unless their author renews them. Listing on
+the public shelf is a second explicit choice, and the one moment a work is moderated.</p>
 <div class="ctas">
 <a class="cta-primary" href="https://inkmirror.cc" rel="noopener">Write with InkMirror</a>
 <a class="cta-quiet" href="${DEMO_WORK_URL}">Read a sample — Rothschild&#39;s Fiddle</a>
+<a class="cta-quiet" href="/shelf">Browse the Shelf</a>
 </div>
 <p class="fine">No accounts. No tracking. <a href="/rules">House rules</a> apply to every shared work.</p>
 </div>

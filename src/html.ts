@@ -102,18 +102,29 @@ export interface ShellOpts {
   body: string;
   /** Extra markup for <head> (scripts belong at the end of body instead). */
   head?: string;
+  /**
+   * /shelf is the ONE indexable page (design spec, CLAUDE.md rule 6);
+   * everything else defaults to the noindex meta.
+   */
+  indexable?: boolean;
+  /** Plain-text meta description — indexable pages should carry one. */
+  description?: string;
 }
 
 /** Wrap body markup in a complete, self-contained HTML document. */
 export function pageShell(opts: ShellOpts): string {
   const lang = escapeHtml(opts.lang ?? 'en');
+  const robots = opts.indexable === true ? '' : '<meta name="robots" content="noindex, nofollow">\n';
+  const description =
+    opts.description !== undefined
+      ? `<meta name="description" content="${escapeHtml(opts.description)}">\n`
+      : '';
   return `<!doctype html>
 <html lang="${lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow">
-<meta name="color-scheme" content="light dark">
+${robots}${description}<meta name="color-scheme" content="light dark">
 <link rel="icon" href="${FAVICON_DATA_URI}">
 <title>${escapeHtml(opts.title)}</title>
 <style>${THEME_CSS}${SHELL_CSS}${opts.css ?? ''}</style>

@@ -64,9 +64,18 @@ algorithm — who checks the claim against these rules. Hard-line violations are
 mislabeling is removed and may be republished with honest labels; everything else stays up.
 Disliking a story is not a violation.</p>
 
+<h2>The public shelf</h2>
+<p>Link-shared works are unlisted and appear nowhere public. Putting a work on
+<a href="/shelf">the Shelf</a> is a separate, explicit choice by its author — and it is
+the moment of moderation: every listing request is reviewed against these rules
+(labels and hard lines, never themes) before the work appears. A refused listing stays
+readable by its link; the author sees why and can fix the labels and try again.
+The shelf shows works by listing date only — no view counts, no rankings, ever.</p>
+
 <h2>Expiry</h2>
 <p>Unlisted links live for <strong>30 days</strong>. The author can renew from the manage
-link, any number of times, or unpublish at any moment. Nothing lingers by accident.</p>
+link, any number of times, or unpublish at any moment. Nothing lingers by accident.
+Works listed on the shelf are exempt from expiry while they stay listed.</p>
 </section>`;
 
 const HU = `<section id="hu" lang="hu">
@@ -119,9 +128,18 @@ a fenti szabályok mentén. A vörös vonalat átlépő mű lekerül; a félrec�
 őszinte címkékkel visszatérhet; minden más fennmarad. Az, hogy egy történet nem tetszik,
 nem szabálysértés.</p>
 
+<h2>A nyilvános polc</h2>
+<p>A linkkel megosztott művek nem listázottak, és sehol sem jelennek meg nyilvánosan.
+Egy mű <a href="/shelf">polcra tétele</a> a szerző külön, kifejezett döntése — és ez a
+moderáció pillanata: minden listázási kérést e szabályok mentén vizsgálunk meg (címkék
+és vörös vonalak, sosem témák), mielőtt a mű megjelenne. Az elutasított listázás linkről
+továbbra is olvasható; a szerző látja az okot, javíthatja a címkéket, és újra próbálkozhat.
+A polc kizárólag a listázás ideje szerint rendez — megtekintésszám és rangsor nincs, soha.</p>
+
 <h2>Lejárat</h2>
 <p>A nem listázott linkek <strong>30 napig</strong> élnek. A szerző a kezelőlinkről bármennyiszer
-meghosszabbíthatja, vagy bármikor visszavonhatja a művet. Semmi sem marad fenn véletlenül.</p>
+meghosszabbíthatja, vagy bármikor visszavonhatja a művet. Semmi sem marad fenn véletlenül.
+A polcra listázott művek a listázás ideje alatt mentesülnek a lejárat alól.</p>
 </section>`;
 
 export function rulesPage(): Response {
