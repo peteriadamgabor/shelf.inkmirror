@@ -7,7 +7,7 @@
  * touches R2 or D1.
  */
 
-import { isPublishBundle, validatePublishBundle, type PublishBundleV1 } from '../../format';
+import { isPublishBundle, validatePublishBundle } from '../../format';
 import { countWords, firstLine } from '../../render';
 import type { Env } from '../lib/env';
 import { randomBase64Url, sha256Hex } from '../lib/crypto';
@@ -32,16 +32,18 @@ export function workUrl(id: string): string {
  *     message InkMirror can surface as-is;
  *   - tombstones: content matching a removed work's hash → flat 403 with no
  *     detail (no oracle for someone probing what exactly got them removed).
+ * Takes the bundle's precomputed content hash — the caller stores the same
+ * hash on the row (moderation dedup), so it is only ever computed once.
  * Returns the error response, or null when the gates are open.
  */
-export async function publishGates(env: Env, bundle: PublishBundleV1): Promise<Response | null> {
+export async function publishGates(env: Env, bundleHash: string): Promise<Response | null> {
   if ((await getSetting(env.SHELF_DB, PAUSED_KEY)) === '1') {
     return Response.json(
       { error: 'publishing_paused', message: 'The Shelf is temporarily closed for new works.' },
       { status: 503 },
     );
   }
-  if (await hasTombstone(env.SHELF_DB, await contentHash(bundle))) {
+  if (await hasTombstone(env.SHELF_DB, bundleHash)) {
     return jsonError(403, 'not_acceptable');
   }
   return null;
@@ -71,7 +73,10 @@ export async function handlePublish(
     return jsonError(400, 'invalid_bundle', e instanceof Error ? e.message : 'validation failed');
   }
 
-  const gate = await publishGates(env, parsed);
+  // Computed once: the tombstone gate checks it, the row stores it (the
+  // moderation chain's dedup key — see migrations/0006_budget.sql).
+  const bundleHash = await contentHash(parsed);
+  const gate = await publishGates(env, bundleHash);
   if (gate !== null) return gate;
 
   const id = randomBase64Url(16); // 22 chars — the capability for unlisted works
@@ -94,6 +99,7 @@ export async function handlePublish(
     warnings: parsed.warnings,
     word_count: countWords(parsed),
     first_line: firstLine(parsed),
+    content_hash: bundleHash,
     created_at: nowIso,
     updated_at: nowIso,
     expires_at: expiresAt,

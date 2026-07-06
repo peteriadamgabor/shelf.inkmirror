@@ -29,6 +29,13 @@ export interface WorkRow {
   moderation_verdict: string | null;
   moderation_at: string | null;
   /**
+   * sha256 of the published prose (block contents only, reading order — the
+   * exact tombstone recipe). Identical-prose updates skip the shadow chain;
+   * the listing gate reuses a verdict whose hash still matches. NULL =
+   * published before migration 0006: unknown, so the chain runs.
+   */
+  content_hash: string | null;
+  /**
    * Phase 3 listing lifecycle: NULL (never requested) | 'pending' | 'listed'
    * | 'refused' | 'held'. Invariant: listed = 1 iff listing_state = 'listed'.
    */
@@ -49,6 +56,7 @@ export interface NewWork {
   warnings: string[];
   word_count: number;
   first_line: string;
+  content_hash: string;
   created_at: string;
   updated_at: string;
   expires_at: string;
@@ -60,6 +68,7 @@ export interface WorkUpdate {
   warnings: string[];
   word_count: number;
   first_line: string;
+  content_hash: string;
   updated_at: string;
 }
 
@@ -72,8 +81,8 @@ export async function insertWork(db: D1Database, w: NewWork): Promise<void> {
     .prepare(
       `INSERT INTO works
         (id, secret_hash, title, pen_name, language, rating, warnings,
-         word_count, first_line, created_at, updated_at, expires_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+         word_count, first_line, content_hash, created_at, updated_at, expires_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`,
     )
     .bind(
       w.id,
@@ -85,6 +94,7 @@ export async function insertWork(db: D1Database, w: NewWork): Promise<void> {
       JSON.stringify(w.warnings),
       w.word_count,
       w.first_line,
+      w.content_hash,
       w.created_at,
       w.updated_at,
       w.expires_at,
@@ -96,10 +106,10 @@ export async function updateWork(db: D1Database, id: string, u: WorkUpdate): Pro
   await db
     .prepare(
       `UPDATE works SET title = ?1, rating = ?2, warnings = ?3,
-         word_count = ?4, first_line = ?5, updated_at = ?6
-       WHERE id = ?7`,
+         word_count = ?4, first_line = ?5, content_hash = ?6, updated_at = ?7
+       WHERE id = ?8`,
     )
-    .bind(u.title, u.rating, JSON.stringify(u.warnings), u.word_count, u.first_line, u.updated_at, id)
+    .bind(u.title, u.rating, JSON.stringify(u.warnings), u.word_count, u.first_line, u.content_hash, u.updated_at, id)
     .run();
 }
 
@@ -498,8 +508,12 @@ export async function relabelWork(
   warnings: string[],
   updatedAt: string,
 ): Promise<void> {
+  // content_hash = NULL stales the cached moderation verdict on purpose: the
+  // verdict was computed against the OLD declaration, and labels are one of
+  // its inputs. NULL = "unknown, run the chain" — so the accept-labels retry
+  // (and any later gate) re-judges instead of reusing a pre-relabel verdict.
   await db
-    .prepare('UPDATE works SET rating = ?1, warnings = ?2, updated_at = ?3 WHERE id = ?4')
+    .prepare('UPDATE works SET rating = ?1, warnings = ?2, updated_at = ?3, content_hash = NULL WHERE id = ?4')
     .bind(rating, JSON.stringify(warnings), updatedAt, id)
     .run();
 }
@@ -580,4 +594,21 @@ export async function setSetting(db: D1Database, key: string, value: string): Pr
     .prepare('INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
     .bind(key, value)
     .run();
+}
+
+/**
+ * Atomically bump a settings counter and return the new value (the chain
+ * budget's check-and-increment). A single SQLite upsert with RETURNING is
+ * race-free on its own, and D1 additionally executes statements against a
+ * database serially — no read-modify-write window either way.
+ */
+export async function incrementCounter(db: D1Database, key: string): Promise<number> {
+  const row = await db
+    .prepare(
+      "INSERT INTO settings (key, value) VALUES (?1, '1') " +
+        'ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1 RETURNING value',
+    )
+    .bind(key)
+    .first<{ value: string | number }>();
+  return Number(row?.value ?? 0);
 }

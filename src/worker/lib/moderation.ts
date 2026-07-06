@@ -24,9 +24,18 @@
  * parse failure becomes an {outcome:'error'} verdict. Nothing here ever
  * throws out of the waitUntil promise.
  *
- * Budget guards: unset ANTHROPIC_API_KEY = complete no-op; works under 200
- * chars are skipped; router replies are capped small; one run per publish,
- * no retries. The publish rate limit remains the outer budget guard.
+ * Budget guards, three layers (plus the operator-side braces: a monthly
+ * spend limit in the Anthropic console):
+ *   1. per-IP rate limits on every write route (the existing outer guard);
+ *   2. content-hash dedup — identical prose never pays twice (updates skip
+ *      the shadow run, the listing gate reuses a fresh verdict);
+ *   3. global daily run cap — settings counter chain_runs_{YYYY-MM-DD} vs
+ *      env.CHAIN_DAILY_CAP, checked-and-incremented BEFORE any API call.
+ *      Over budget, shadow runs record {outcome:'skipped'} and listing
+ *      requests degrade to the no-key manual-review path — exhaustion never
+ *      grants a listing and never blocks link-publishing.
+ * Also: unset ANTHROPIC_API_KEY = complete no-op; works under 200 chars are
+ * skipped; router replies are capped small; one run per publish, no retries.
  */
 
 import {
@@ -37,7 +46,7 @@ import {
   type WarningTag,
 } from '../../format';
 import type { Env } from './env';
-import { setModerationVerdict } from './db';
+import { incrementCounter, setModerationVerdict } from './db';
 
 // Model choices (Claude API, 2026-07): claude-haiku-4-5 is the current
 // small/fast tier — right for high-volume yes/no routing. claude-sonnet-5 is
@@ -64,9 +73,38 @@ const VERIFIER_MAX_TOKENS = 1_000;
 const VERIFIER_MAX_EXCERPT_CHUNKS = 8;
 const OVERALL_TIMEOUT_MS = 60_000;
 
+// ---------- global daily run budget ----------
+
+export const CHAIN_DAILY_CAP_DEFAULT = 100;
+export const CHAIN_DAILY_CAP_MIN = 1;
+export const CHAIN_DAILY_CAP_MAX = 10_000;
+
+/** env.CHAIN_DAILY_CAP parsed: default 100, clamped 1..10000. */
+export function chainDailyCap(raw: string | undefined): number {
+  const parsed = raw === undefined ? NaN : Number.parseInt(raw, 10);
+  if (Number.isNaN(parsed)) return CHAIN_DAILY_CAP_DEFAULT;
+  return Math.min(CHAIN_DAILY_CAP_MAX, Math.max(CHAIN_DAILY_CAP_MIN, parsed));
+}
+
+/** Settings key of the day's run counter — UTC date, so it rolls at 00:00Z. */
+export function chainRunsKey(now: Date = new Date()): string {
+  return `chain_runs_${now.toISOString().slice(0, 10)}`;
+}
+
+/**
+ * Check-and-increment the day's run counter BEFORE any Anthropic call.
+ * Returns true when this run fits the budget. The increment sticks even
+ * when the run later fails — an errored attempt consumed spend, and letting
+ * error loops run free would defeat the cap.
+ */
+export async function consumeChainBudget(env: Env): Promise<boolean> {
+  const used = await incrementCounter(env.SHELF_DB, chainRunsKey());
+  return used <= chainDailyCap(env.CHAIN_DAILY_CAP);
+}
+
 // ---------- verdict ----------
 
-export type ModerationOutcome = 'pass' | 'tag-fix' | 'hold' | 'error';
+export type ModerationOutcome = 'pass' | 'tag-fix' | 'hold' | 'error' | 'skipped';
 
 export interface ModerationVerdict {
   outcome: ModerationOutcome;
@@ -583,6 +621,7 @@ async function notifyDiscord(
     'tag-fix': 0xd9a441, // amber
     error: 0x8a8a8a,
     pass: 0x8a8a8a,
+    skipped: 0x8a8a8a, // never posted — budget skips stay out of Discord
   };
   const lines: string[] = [];
   if (verdict.reason !== undefined && verdict.reason.length > 0) lines.push(verdict.reason);
@@ -654,9 +693,25 @@ export async function runChainVerdict(
   }
 }
 
+/** The verdict a budget-skipped shadow run records instead of calling out. */
+export function budgetSkippedVerdict(): ModerationVerdict {
+  return {
+    outcome: 'skipped',
+    truncated: false,
+    flaggedChunks: 0,
+    reason: 'daily budget reached',
+    model: '',
+    ms: 0,
+  };
+}
+
 /**
  * The waitUntil body. Never rejects: every failure collapses into an
  * {outcome:'error'} verdict, and even the verdict write is defended.
+ * Checks the global daily budget before spending: over budget, a 'skipped'
+ * verdict is stored and nothing else happens — no API call, no Discord
+ * (a daily ping-per-publish would be pure noise; the admin console carries
+ * the counter).
  */
 export async function runModerationChain(
   env: Env,
@@ -664,7 +719,9 @@ export async function runModerationChain(
   bundle: PublishBundleV1,
   workId: string,
 ): Promise<void> {
-  const verdict = await runChainVerdict(apiKey, bundle, workId);
+  const verdict = (await consumeChainBudget(env))
+    ? await runChainVerdict(apiKey, bundle, workId)
+    : budgetSkippedVerdict();
 
   try {
     // Silently a no-op when the work was unpublished mid-run — the UPDATE
@@ -675,8 +732,9 @@ export async function runModerationChain(
     return;
   }
 
-  // Pass outcomes live in D1 only — no Discord noise for the common case.
-  if (verdict.outcome !== 'pass') {
+  // Pass outcomes live in D1 only — no Discord noise for the common case,
+  // and budget skips stay silent too (they'd fire on every publish all day).
+  if (verdict.outcome !== 'pass' && verdict.outcome !== 'skipped') {
     await notifyDiscord(env, workId, bundle.title, verdict);
   }
 }

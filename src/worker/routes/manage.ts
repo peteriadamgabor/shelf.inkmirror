@@ -15,6 +15,7 @@ import { isPublishBundle, validatePublishBundle } from '../../format';
 import { countWords, firstLine } from '../../render';
 import type { Env } from '../lib/env';
 import { constantTimeEqualHex, sha256Hex } from '../lib/crypto';
+import { contentHash } from '../lib/content-hash';
 import { bakeWork, deleteWorkObjects } from '../lib/bake';
 import {
   deleteLetter,
@@ -281,8 +282,23 @@ async function update(
 
   // Updates pass the same operator gates as first publishes — a tombstoned
   // text must not slip back in as an "update" to an unrelated work.
-  const gate = await publishGates(env, parsed);
+  const bundleHash = await contentHash(parsed);
+  const gate = await publishGates(env, bundleHash);
   if (gate !== null) return gate;
+
+  // Content-hash dedup, decided against the PRE-update row: identical prose
+  // that already has a verdict is not paid for twice — the old verdict
+  // stands, the shadow chain is skipped entirely (no budget consumed).
+  // NULL stored hash = pre-0006 row = unknown, run it. Labels are part of
+  // the verdict's inputs (a verdict answers "is this honestly labeled?"),
+  // so a rating/warnings change re-runs the chain even on identical prose —
+  // otherwise same-prose relabeling could ride a stale pass verdict onto
+  // the shelf unreviewed.
+  const unchanged =
+    row.content_hash === bundleHash &&
+    row.moderation_verdict !== null &&
+    row.rating === parsed.rating &&
+    row.warnings === JSON.stringify(parsed.warnings);
 
   await bakeWork(parsed, row.id, env);
 
@@ -293,12 +309,13 @@ async function update(
     warnings: parsed.warnings,
     word_count: countWords(parsed),
     first_line: firstLine(parsed),
+    content_hash: bundleHash,
     updated_at: updatedAt,
   });
 
   // Updates re-run the shadow chain the same as first publishes — the new
   // text is already baked; the chain only observes. No-op without the key.
-  scheduleModeration(ctx, env, parsed, row.id);
+  if (!unchanged) scheduleModeration(ctx, env, parsed, row.id);
 
   return Response.json({ ok: true, id: row.id, url: workUrl(row.id), updated_at: updatedAt });
 }

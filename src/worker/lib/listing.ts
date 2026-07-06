@@ -21,6 +21,14 @@
  * admin console. CLAUDE.md rule 5 holds throughout: the chain may pass or
  * suggest, but a hard-line suspicion is always a human's call.
  *
+ * Budget guards (see moderation.ts): when the stored verdict is a real chain
+ * outcome (pass/tag-fix/hold — never error/skipped) AND the stored
+ * content_hash matches the current bundle, the gate REUSES it — the mapped
+ * listing_verdict records { reused: true } and no API call happens.
+ * Otherwise the run is charged against the global daily cap; over budget,
+ * requests degrade to the no-key manual path — budget exhaustion never
+ * grants a listing and never blocks link-publishing.
+ *
  * Every gate write is guarded on listing_state = 'pending' (see
  * resolveListingPending) — an author who delists or unpublishes mid-run wins
  * against a slow chain, and the Discord ping is skipped with the write.
@@ -28,7 +36,8 @@
 
 import { isPublishBundle, type PublishBundleV1, type Rating, type WarningTag } from '../../format';
 import type { Env } from './env';
-import { runChainVerdict } from './moderation';
+import { contentHash } from './content-hash';
+import { consumeChainBudget, parseModerationVerdict, runChainVerdict, type ModerationVerdict } from './moderation';
 import {
   bundleKey,
   getWork,
@@ -38,12 +47,19 @@ import {
 
 // ---------- author-facing verdict ----------
 
+/**
+ * `reused: true` marks a decision made from the stored verdict of an earlier
+ * chain run whose content hash still matches — no new API call was spent.
+ * The bare `{ reused: true }` form is the listed case, which otherwise
+ * stores no verdict at all.
+ */
 export type ListingVerdict =
-  | { reason: 'labels'; suggested?: { rating: Rating; warnings: WarningTag[] } }
-  | { reason: 'review' }
+  | { reason: 'labels'; suggested?: { rating: Rating; warnings: WarningTag[] }; reused?: true }
+  | { reason: 'review'; reused?: true }
   | { reason: 'error' }
   | { reason: 'manual' }
-  | { reason: 'operator' };
+  | { reason: 'operator' }
+  | { reused: true };
 
 const LISTING_REASONS = new Set(['labels', 'review', 'error', 'manual', 'operator']);
 
@@ -52,14 +68,14 @@ export function parseListingVerdict(raw: string | null): ListingVerdict | null {
   if (raw === null) return null;
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      !Array.isArray(parsed) &&
-      typeof (parsed as Record<string, unknown>)['reason'] === 'string' &&
-      LISTING_REASONS.has((parsed as Record<string, unknown>)['reason'] as string)
-    ) {
-      return parsed as ListingVerdict;
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      const rec = parsed as Record<string, unknown>;
+      if (
+        (typeof rec['reason'] === 'string' && LISTING_REASONS.has(rec['reason'])) ||
+        rec['reused'] === true
+      ) {
+        return parsed as ListingVerdict;
+      }
     }
   } catch {
     /* stored by us, but never trust a parse */
@@ -195,15 +211,49 @@ export async function runListingGate(env: Env, workId: string): Promise<void> {
       return;
     }
 
-    const verdict = await runChainVerdict(apiKey, bundle, workId);
-    // The chain ran either way — record the observation for the admin surface
-    // just like the shadow runs do (a plain UPDATE, silent if the row is gone).
-    await setModerationVerdict(env.SHELF_DB, workId, JSON.stringify(verdict), new Date().toISOString());
+    // Content-hash reuse: a verdict from a real chain run (never a reused
+    // error — a broken run is not an observation) on exactly this prose
+    // makes the gate decision free.
+    const currentHash = await contentHash(bundle);
+    const stored = parseModerationVerdict(row.moderation_verdict);
+    const reused =
+      stored !== null &&
+      row.content_hash !== null &&
+      row.content_hash === currentHash &&
+      (stored.outcome === 'pass' || stored.outcome === 'tag-fix' || stored.outcome === 'hold');
+
+    let verdict: ModerationVerdict;
+    if (reused && stored !== null) {
+      verdict = stored;
+    } else {
+      // Fresh run — charged against the global daily budget. Over budget the
+      // request degrades to the exact no-key posture: held, a human decides.
+      // Budget exhaustion must NEVER grant a listing.
+      if (!(await consumeChainBudget(env))) {
+        if (await resolveAndConfirm(env, workId, 'held', null, { reason: 'manual' })) {
+          await notifyListingDiscord(env, workId, row.title, {
+            title: 'LISTING REQUEST — manual review (chain budget reached)',
+            description:
+              'The global daily budget for moderation-chain runs is exhausted, so the ' +
+              'listing gate cannot run today. Approve or deny from the admin console, ' +
+              'or wait for the counter to roll at 00:00 UTC.',
+            color: COLOR_AMBER,
+            footer: 'The work stays readable by link; it is NOT listed until you decide.',
+          });
+        }
+        return;
+      }
+      verdict = await runChainVerdict(apiKey, bundle, workId);
+      // The chain ran — record the observation for the admin surface just
+      // like the shadow runs do (a plain UPDATE, silent if the row is gone).
+      await setModerationVerdict(env.SHELF_DB, workId, JSON.stringify(verdict), new Date().toISOString());
+    }
 
     switch (verdict.outcome) {
       case 'pass': {
         const listedAt = new Date().toISOString();
-        if (await resolveAndConfirm(env, workId, 'listed', listedAt, null)) {
+        const v: ListingVerdict | null = reused ? { reused: true } : null;
+        if (await resolveAndConfirm(env, workId, 'listed', listedAt, v)) {
           // Informational, early-days visibility — the shelf is small enough
           // that the operator wants to see every arrival.
           await notifyListingDiscord(env, workId, row.title, {
@@ -217,15 +267,17 @@ export async function runListingGate(env: Env, workId: string): Promise<void> {
       }
       case 'tag-fix': {
         // Author-facing, no Discord: the fix is theirs to make, no human needed.
-        const v: ListingVerdict =
-          verdict.suggested !== undefined
-            ? { reason: 'labels', suggested: verdict.suggested }
-            : { reason: 'labels' };
+        const v: ListingVerdict = {
+          reason: 'labels',
+          ...(verdict.suggested !== undefined ? { suggested: verdict.suggested } : {}),
+          ...(reused ? { reused: true as const } : {}),
+        };
         await resolveAndConfirm(env, workId, 'refused', null, v);
         return;
       }
       case 'hold': {
-        if (await resolveAndConfirm(env, workId, 'held', null, { reason: 'review' })) {
+        const v: ListingVerdict = { reason: 'review', ...(reused ? { reused: true as const } : {}) };
+        if (await resolveAndConfirm(env, workId, 'held', null, v)) {
           await notifyListingDiscord(env, workId, row.title, {
             title: 'LISTING HELD — needs your decision',
             description: verdict.reason ?? 'hard-line suspicion, no detail recorded',
@@ -235,6 +287,10 @@ export async function runListingGate(env: Env, workId: string): Promise<void> {
         }
         return;
       }
+      // 'skipped' can't actually reach here (the reuse filter excludes it and
+      // runChainVerdict never returns it) — but if it somehow did, the fail-
+      // safe direction is the same as a broken chain: held, a human decides.
+      case 'skipped':
       case 'error': {
         if (await resolveAndConfirm(env, workId, 'held', null, { reason: 'error' })) {
           await notifyListingDiscord(env, workId, row.title, {
