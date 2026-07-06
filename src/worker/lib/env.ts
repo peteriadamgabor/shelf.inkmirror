@@ -19,6 +19,13 @@ export interface Env {
   /** Phase 2 moderation chain. Wrangler Secret. */
   ANTHROPIC_API_KEY?: string;
   /**
+   * Global daily cap on moderation-chain runs (shadow AND listing gate) —
+   * the code-side belt to the Anthropic console's spend-limit braces.
+   * Plain var in wrangler.jsonc ("vars"), NOT a secret. Parsed as an int,
+   * default 100, clamped 1..10000 (see chainDailyCap in moderation.ts).
+   */
+  CHAIN_DAILY_CAP?: string;
+  /**
    * Operator toolkit auth (X-Admin-Secret on /api/admin/*). Wrangler Secret.
    * Unset = the whole admin surface answers 404, indistinguishable from an
    * unknown route.

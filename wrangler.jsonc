@@ -11,6 +11,14 @@
 		{ "pattern": "shelf.inkmirror.cc", "custom_domain": true }
 	],
 
+	// Plain vars (not secrets). CHAIN_DAILY_CAP: global daily cap on
+	// moderation-chain runs (shadow + listing gate) — parsed int, default 100,
+	// clamped 1..10000. Code-side belt; the Anthropic console's monthly spend
+	// limit is the braces.
+	"vars": {
+		"CHAIN_DAILY_CAP": "100"
+	},
+
 	"r2_buckets": [
 		{ "binding": "SHELF_R2", "bucket_name": "inkmirror-shelf" }
 	],
