@@ -411,9 +411,41 @@ runs stay shadow.
    or parse failure collapses into an `{outcome:'error', reason}` verdict;
    nothing ever rejects out of the `waitUntil`, and the publish response is
    never affected (it already returned).
-7. **Budget guards** — no key = no-op; works under 200 chars skipped; small
-   `max_tokens` on router calls; one run per publish/update, no retries.
-   The publish rate limit remains the outer API-budget guard.
+7. **Budget guards — three layers** (shipped 2026-07-06, migration
+   `0006_budget.sql`), from outermost to innermost:
+   1. **Per-IP rate limits** on every write route (the existing outer
+      guard) — nobody triggers chain runs faster than the publish/manage
+      limits allow.
+   2. **Content-hash dedup** — the same prose never pays twice.
+      `works.content_hash` stores the bundle's prose hash (the exact
+      tombstone recipe, computed once per publish/update and shared with the
+      tombstone gate). An update whose hash, rating, AND warnings match the
+      stored row while a verdict exists skips the shadow chain entirely
+      (labels are verdict inputs — "is this honestly labeled?" — so a
+      same-prose relabel re-runs; `relabelWork` also NULLs the hash for the
+      same reason). The listing gate REUSES the stored verdict when it is a
+      real chain outcome (`pass`/`tag-fix`/`hold` — never `error`/`skipped`)
+      and the hash still matches the stored bundle; the mapped
+      `listing_verdict` then records `reused: true` and no API call happens.
+      `NULL` hash (pre-0006 rows) = unknown → run the chain; hashes backfill
+      on the next publish/update, no data migration.
+   3. **Global daily run cap** — a settings counter
+      (`chain_runs_{YYYY-MM-DD}`, UTC-keyed, atomic upsert-RETURNING) is
+      checked-and-incremented BEFORE any Anthropic call, against
+      `CHAIN_DAILY_CAP` (plain wrangler var, parsed int, default 100,
+      clamped 1..10000). Failed runs still count — error loops can't burn
+      free retries. **Fail-safe degradation:** over budget, shadow runs
+      store `{outcome:'skipped', reason:'daily budget reached'}` with no
+      Discord noise, and listing requests fall back to the no-key manual
+      path (`held`, `{reason:'manual'}`, Discord "manual review (chain
+      budget reached)"). Budget exhaustion never grants a listing and never
+      blocks link-publishing.
+
+   Operator-side recommendation: also set a **monthly spend limit in the
+   Anthropic console** — the code caps are the belt, the console limit is
+   the braces. The admin overview carries
+   `chainBudget: { cap, usedToday }` and the console's stats row shows
+   "chain today used/cap".
 
 Phase 3 shipped the author-facing `tag-fix` outcome for listings: the
 suggestion lands in `listing_verdict` and the manage page offers one-click
@@ -422,8 +454,8 @@ excerpts in that report remain future polish; shadow-run suggestions on
 plain publishes stay operator-visible only.
 
 Cost: Haiku-class routing + one Sonnet verification on the rare flagged work
-≈ low single-digit cents per novel. The publish rate limit is also the
-API-budget guard.
+≈ low single-digit cents per novel. With the three budget layers above, the
+worst day costs at most `CHAIN_DAILY_CAP` chain runs regardless of traffic.
 
 ## Phase 1.5 — operator toolkit (shipped)
 
