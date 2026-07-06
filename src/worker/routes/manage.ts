@@ -1,7 +1,8 @@
 /**
  * Authenticated manage surface: GET (meta) / PUT (re-bake) / DELETE
  * (unpublish) on /api/works/:id, plus POST .../renew, PUT .../password,
- * GET .../letters, DELETE .../letters/:letterId, PUT .../letters-open.
+ * PUT .../listing, PUT .../labels, GET .../letters,
+ * DELETE .../letters/:letterId, PUT .../letters-open.
  *
  * Auth = X-Manage-Secret header, sha256'd and compared constant-time against
  * the stored hash. A wrong secret and a nonexistent id return the SAME 404
@@ -18,8 +19,10 @@ import { bakeWork, deleteWorkObjects } from '../lib/bake';
 import {
   deleteLetter,
   deleteWork,
+  delistWork,
   getWork,
   listLetters,
+  markListingPending,
   renewWork,
   setLettersOpen,
   setPasswordHash,
@@ -27,6 +30,8 @@ import {
   type WorkRow,
 } from '../lib/db';
 import { scheduleModeration } from '../lib/moderation';
+import { parseListingVerdict, runListingGate } from '../lib/listing';
+import { parseLabels, relabelAndRebake } from '../lib/relabel';
 import {
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
@@ -71,6 +76,9 @@ function metaJson(row: WorkRow): Response {
     warnings: parseWarnings(row.warnings),
     views: row.views,
     passwordProtected: row.password_hash !== null,
+    listingState: row.listing_state,
+    listingVerdict: parseListingVerdict(row.listing_verdict),
+    listedAt: row.listed_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
     expires_at: row.expires_at,
@@ -84,6 +92,8 @@ export type ManageAction =
   | 'unpublish'
   | 'renew'
   | 'password'
+  | 'listing'
+  | 'labels'
   | 'letters'
   | 'letters-open'
   | 'letter-delete';
@@ -116,6 +126,10 @@ export async function handleManage(
     }
     case 'password':
       return await setPassword(request, env, row);
+    case 'listing':
+      return await setListing(request, env, ctx, row);
+    case 'labels':
+      return await setLabels(request, env, row);
     case 'letters': {
       const letters = await listLetters(env.SHELF_DB, row.id, LETTERS_PER_WORK_CAP);
       return Response.json({ lettersOpen: row.letters_open === 1, letters });
@@ -166,6 +180,71 @@ async function setPassword(request: Request, env: Env, row: WorkRow): Promise<Re
   }
   await setPasswordHash(env.SHELF_DB, row.id, await hashPassword(password));
   return Response.json({ ok: true, passwordProtected: true });
+}
+
+/**
+ * PUT /api/works/:id/listing — body { list: boolean }.
+ *
+ * list:false delists immediately, always (the shelf is the author's choice
+ * both ways). list:true requires an active, non-password-locked work — a
+ * public listing nobody can open is a support burden, not a feature (409
+ * password_locked) — then goes 'pending' and schedules the gate. Requests
+ * that are already listed/pending/held answer with the current state and do
+ * nothing: no gate re-run, no Discord spam from a retry loop.
+ */
+async function setListing(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  row: WorkRow,
+): Promise<Response> {
+  const body = await readSmallJson(request);
+  if (body === null || typeof body['list'] !== 'boolean') return jsonError(400, 'invalid_body');
+
+  if (body['list'] === false) {
+    await delistWork(env.SHELF_DB, row.id);
+    return Response.json({ ok: true, listingState: null });
+  }
+
+  // Idempotent re-requests: an in-flight or settled-positive state stands.
+  if (row.listing_state === 'listed' || row.listing_state === 'pending' || row.listing_state === 'held') {
+    return Response.json({ ok: true, listingState: row.listing_state });
+  }
+  if (row.status !== 'active') return jsonError(409, 'not_active');
+  if (row.password_hash !== null) return jsonError(409, 'password_locked');
+  // rating + warnings are guaranteed by the publish validator and the schema.
+
+  await markListingPending(env.SHELF_DB, row.id);
+  ctx.waitUntil(
+    runListingGate(env, row.id).catch((e) => {
+      // runListingGate already swallows everything; belt to its suspenders.
+      console.error(`[listing] unexpected: ${e instanceof Error ? e.message : String(e)}`);
+    }),
+  );
+  return Response.json({ ok: true, listingState: 'pending' });
+}
+
+/**
+ * PUT /api/works/:id/labels — body { rating, warnings }. The author-
+ * authorized twin of the operator's relabel: validates the fixed
+ * vocabularies, mutates the stored bundle, re-bakes. Phase 3's "accept the
+ * gate's suggested labels & retry" flow calls this, then re-requests the
+ * listing.
+ */
+async function setLabels(request: Request, env: Env, row: WorkRow): Promise<Response> {
+  const body = await readSmallJson(request);
+  if (body === null) return jsonError(400, 'invalid_body');
+  const labels = parseLabels(body);
+  if (!labels.ok) return jsonError(400, labels.error);
+
+  const result = await relabelAndRebake(env, row.id, labels.rating, labels.warnings);
+  if (!result.ok) return jsonError(409, result.error);
+  return Response.json({
+    ok: true,
+    rating: labels.rating,
+    warnings: labels.warnings,
+    updated_at: result.updated_at,
+  });
 }
 
 /** PUT /api/works/:id/letters-open — body { open: boolean }. */

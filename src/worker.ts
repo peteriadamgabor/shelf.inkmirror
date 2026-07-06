@@ -1,13 +1,15 @@
 /**
  * The Shelf — Cloudflare Worker entry (shelf.inkmirror.cc).
  *
- * Routes (Phase 1 + 1.5 + password tier + letters):
+ * Routes (Phase 1 + 1.5 + password tier + letters + Phase 3 shelf):
  *   POST   /api/publish           validate + gates + bake + store → { id, url, manageSecret }
  *   GET    /api/works/:id         meta JSON (incl. passwordProtected) [X-Manage-Secret]
  *   PUT    /api/works/:id         replace content (re-bake)      [X-Manage-Secret]
  *   DELETE /api/works/:id         unpublish                      [X-Manage-Secret]
  *   POST   /api/works/:id/renew   push expiry +30d               [X-Manage-Secret]
  *   PUT    /api/works/:id/password  set/clear the reading password [X-Manage-Secret]
+ *   PUT    /api/works/:id/listing { list } request/withdraw a shelf listing [X-Manage-Secret]
+ *   PUT    /api/works/:id/labels  { rating, warnings } accept-labels re-bake [X-Manage-Secret]
  *   POST   /api/works/:id/report  rule-violation report → D1 + Discord webhook
  *   POST   /api/works/:id/letters reader → author letter (D1 only, no Discord)
  *   GET    /api/works/:id/letters author's inbox                 [X-Manage-Secret]
@@ -23,8 +25,10 @@
  *   GET    /w/:id/letter          live letter form (404 while letters are closed)
  *   GET    /admin                 operator console (secret lives in URL fragment)
  *   GET    /                      landing
+ *   GET    /shelf                 public browse page — live-rendered, the ONE indexable route
  *   GET    /rules                 ratings, warning tags, hard lines
  *   cron   daily                  purge expired works + removed works past grace
+ *                                 (listed works are exempt while listed)
  */
 
 import type { Env } from './worker/lib/env';
@@ -39,6 +43,7 @@ import { handleUnlock } from './worker/routes/unlock';
 import { handleAdmin } from './worker/routes/admin';
 import { handleRead, handleReadChapter, notFoundPage } from './worker/routes/read';
 import { landingPage } from './worker/pages/landing';
+import { shelfPage } from './worker/pages/shelf-page';
 import { rulesPage } from './worker/pages/rules';
 import { managePage } from './worker/pages/manage-page';
 import { adminPage } from './worker/pages/admin-page';
@@ -63,12 +68,14 @@ const HTML_CSP =
   "base-uri 'none'; " +
   "frame-ancestors 'none'";
 
-function withBaseHeaders(res: Response): Response {
+function withBaseHeaders(res: Response, indexable: boolean): Response {
   const headers = new Headers(res.headers);
   headers.set('x-content-type-options', 'nosniff');
   headers.set('referrer-policy', 'no-referrer');
-  // Published pages are shareable but never indexable.
-  headers.set('x-robots-tag', 'noindex, nofollow');
+  // Published pages are shareable but never indexable — with ONE exception:
+  // /shelf is the public browse surface and opts out (same pattern as the
+  // CSP passthrough below). /w/* stays noindex regardless of rating.
+  if (!indexable) headers.set('x-robots-tag', 'noindex, nofollow');
   // A route may ship its own CSP (only /w/:id/report does, for Turnstile);
   // everything else gets the strict inline-only policy.
   if (
@@ -80,14 +87,17 @@ function withBaseHeaders(res: Response): Response {
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
 
+/** The ONE indexable route on the domain (CLAUDE.md rule 6). */
+const INDEXABLE_PATHS = new Set(['/shelf']);
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
 
-    const res = await route(request, env, ctx, path, method);
-    const withHeaders = withBaseHeaders(res);
+    const res = await route(request, env, ctx, url, path, method);
+    const withHeaders = withBaseHeaders(res, INDEXABLE_PATHS.has(path));
     return path.startsWith('/api/') ? withCors(request, withHeaders) : withHeaders;
   },
 
@@ -100,6 +110,7 @@ async function route(
   request: Request,
   env: Env,
   ctx: ExecutionContext,
+  url: URL,
   path: string,
   method: string,
 ): Promise<Response> {
@@ -128,7 +139,7 @@ async function route(
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
 
-  const workMatch = path.match(/^\/api\/works\/([^/]{1,64})(\/(renew|report|password|letters|letters-open))?$/);
+  const workMatch = path.match(/^\/api\/works\/([^/]{1,64})(\/(renew|report|password|listing|labels|letters|letters-open))?$/);
   if (workMatch) {
     const [, id, , action] = workMatch;
     if (method === 'OPTIONS') return preflightResponse(request);
@@ -140,6 +151,8 @@ async function route(
     if (action === 'report' && method === 'POST') return await handleReport(request, env, workId);
     if (action === 'renew' && method === 'POST') return await handleManage(request, env, ctx, workId, 'renew');
     if (action === 'password' && method === 'PUT') return await handleManage(request, env, ctx, workId, 'password');
+    if (action === 'listing' && method === 'PUT') return await handleManage(request, env, ctx, workId, 'listing');
+    if (action === 'labels' && method === 'PUT') return await handleManage(request, env, ctx, workId, 'labels');
     if (action === 'letters' && method === 'POST') return await handleLetterSubmit(request, env, workId);
     if (action === 'letters' && method === 'GET') return await handleManage(request, env, ctx, workId, 'letters');
     if (action === 'letters-open' && method === 'PUT') return await handleManage(request, env, ctx, workId, 'letters-open');
@@ -178,6 +191,7 @@ async function route(
   }
 
   if (method === 'GET' && path === '/') return landingPage();
+  if (method === 'GET' && path === '/shelf') return await shelfPage(url, env);
   if (method === 'GET' && path === '/rules') return rulesPage();
   if (method === 'GET' && path === '/admin') return adminPage();
 

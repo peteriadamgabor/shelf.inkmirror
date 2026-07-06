@@ -3,20 +3,20 @@
  * X-Admin-Secret header (src/worker/lib/admin.ts). Unauthenticated callers
  * get the same HTML 404 as an unknown route — the surface is not probeable.
  *
- *   GET    /api/admin/overview            counts, recent works/reports, pause state, tombstones
+ *   GET    /api/admin/overview            counts, recent works/reports, held listings, pause state, tombstones
  *   GET    /api/admin/works/:id           full row (minus secret hashes) + its reports
- *   POST   /api/admin/works/:id/remove    status='removed' (+ optional tombstone)
+ *   POST   /api/admin/works/:id/remove    status='removed' (+ optional tombstone); also delists
  *   POST   /api/admin/works/:id/restore   back to 'active' (only from 'removed')
  *   POST   /api/admin/works/:id/relabel   fix rating/warnings + re-bake the page
+ *   POST   /api/admin/works/:id/listing   { action: 'approve' | 'deny' } a held/pending listing
  *   POST   /api/admin/works/:id/expiry    set expires_at = now + days
  *   POST   /api/admin/pause               panic switch (settings.publishing_paused)
  *   DELETE /api/admin/tombstones/:hash    forgive a tombstone
  */
 
-import { RATINGS, WARNING_TAGS, isPublishBundle, type PublishBundleV1, type WarningTag } from '../../format';
+import { isPublishBundle, type PublishBundleV1 } from '../../format';
 import type { Env } from '../lib/env';
 import { adminAuthorized } from '../lib/admin';
-import { bakeWork } from '../lib/bake';
 import { contentHash } from '../lib/content-hash';
 import {
   bundleKey,
@@ -24,20 +24,23 @@ import {
   deleteTombstone,
   getSetting,
   getWork,
+  listHeldListings,
   listRecentReports,
   listRecentWorks,
   listReportsForWork,
   listTombstones,
-  relabelWork,
   removeWork,
   renewWork,
   restoreWork,
+  setListingResolved,
   setSetting,
   totalViews,
   upsertTombstone,
   type WorkRow,
 } from '../lib/db';
 import { parseModerationVerdict } from '../lib/moderation';
+import { parseListingVerdict } from '../lib/listing';
+import { parseLabels, relabelAndRebake } from '../lib/relabel';
 import { WORK_ID_RE, clientIp, jsonError, readBodyCapped } from '../lib/http';
 import { PAUSED_KEY } from './publish';
 import { notFoundPage } from './read';
@@ -45,8 +48,7 @@ import { notFoundPage } from './read';
 const MAX_ADMIN_BODY_BYTES = 16 * 1024;
 const MAX_TOMBSTONE_NOTE = 500;
 const RECENT_LIMIT = 20;
-const RATING_SET = new Set<string>(RATINGS);
-const WARNING_SET = new Set<string>(WARNING_TAGS);
+const HELD_LIMIT = 50;
 const CONTENT_HASH_RE = /^[0-9a-f]{64}$/;
 
 export async function handleAdmin(request: Request, env: Env, path: string, method: string): Promise<Response> {
@@ -60,7 +62,7 @@ export async function handleAdmin(request: Request, env: Env, path: string, meth
   if (path === '/api/admin/overview' && method === 'GET') return await overview(env);
   if (path === '/api/admin/pause' && method === 'POST') return await pause(request, env);
 
-  const workMatch = path.match(/^\/api\/admin\/works\/([^/]{1,64})(?:\/(remove|restore|relabel|expiry))?$/);
+  const workMatch = path.match(/^\/api\/admin\/works\/([^/]{1,64})(?:\/(remove|restore|relabel|listing|expiry))?$/);
   if (workMatch) {
     const [, rawId, action] = workMatch;
     if (!WORK_ID_RE.test(rawId ?? '')) return jsonError(404, 'not_found');
@@ -71,6 +73,7 @@ export async function handleAdmin(request: Request, env: Env, path: string, meth
     if (action === 'remove' && method === 'POST') return await remove(request, env, row);
     if (action === 'restore' && method === 'POST') return await restore(env, row);
     if (action === 'relabel' && method === 'POST') return await relabel(request, env, row);
+    if (action === 'listing' && method === 'POST') return await decideListing(request, env, row);
     if (action === 'expiry' && method === 'POST') return await setExpiry(request, env, row);
     return jsonError(405, 'method_not_allowed');
   }
@@ -119,11 +122,12 @@ async function loadBundle(env: Env, id: string): Promise<PublishBundleV1 | null>
 
 async function overview(env: Env): Promise<Response> {
   const db = env.SHELF_DB;
-  const [works, views, recentWorks, recentReports, paused, tombstones] = await Promise.all([
+  const [works, views, recentWorks, recentReports, held, paused, tombstones] = await Promise.all([
     countWorksByStatus(db),
     totalViews(db),
     listRecentWorks(db, RECENT_LIMIT),
     listRecentReports(db, RECENT_LIMIT),
+    listHeldListings(db, HELD_LIMIT),
     getSetting(db, PAUSED_KEY),
     listTombstones(db, 100),
   ]);
@@ -132,6 +136,11 @@ async function overview(env: Env): Promise<Response> {
     totalViews: views,
     recentWorks,
     recentReports,
+    // The operator's queue: listing requests waiting on a human decision.
+    heldListings: held.map(({ listing_verdict, ...rest }) => ({
+      ...rest,
+      listing: parseListingVerdict(listing_verdict),
+    })),
     publishingPaused: paused === '1',
     tombstones,
   });
@@ -141,10 +150,14 @@ async function workDetail(env: Env, row: WorkRow): Promise<Response> {
   const reports = await listReportsForWork(env.SHELF_DB, row.id, 100);
   // The manage-secret hash (and any future password hash) is the author's
   // capability material — the operator has no use for it, so it never leaves.
-  // The raw verdict JSON string is replaced by its parsed form.
-  const { secret_hash: _sh, password_hash: _ph, moderation_verdict, ...safe } = row;
+  // The raw verdict JSON strings are replaced by their parsed forms.
+  const { secret_hash: _sh, password_hash: _ph, moderation_verdict, listing_verdict, ...safe } = row;
   return Response.json({
-    work: { ...safe, moderation: parseModerationVerdict(moderation_verdict) },
+    work: {
+      ...safe,
+      moderation: parseModerationVerdict(moderation_verdict),
+      listing: parseListingVerdict(listing_verdict),
+    },
     reports,
   });
 }
@@ -184,27 +197,41 @@ async function restore(env: Env, row: WorkRow): Promise<Response> {
 async function relabel(request: Request, env: Env, row: WorkRow): Promise<Response> {
   const body = await readJsonBody(request);
   if (body === null) return jsonError(400, 'invalid_body');
+  const labels = parseLabels(body);
+  if (!labels.ok) return jsonError(400, labels.error);
 
-  const rating = body['rating'];
-  if (typeof rating !== 'string' || !RATING_SET.has(rating)) return jsonError(400, 'invalid_rating');
-  const warningsRaw = body['warnings'];
-  if (!Array.isArray(warningsRaw)) return jsonError(400, 'invalid_warnings');
-  const warnings: WarningTag[] = [];
-  for (const w of warningsRaw) {
-    if (typeof w !== 'string' || !WARNING_SET.has(w)) return jsonError(400, 'invalid_warnings');
-    if (!warnings.includes(w as WarningTag)) warnings.push(w as WarningTag);
+  const result = await relabelAndRebake(env, row.id, labels.rating, labels.warnings);
+  if (!result.ok) return jsonError(409, result.error);
+  return Response.json({
+    ok: true,
+    rating: labels.rating,
+    warnings: labels.warnings,
+    updated_at: result.updated_at,
+  });
+}
+
+/**
+ * POST /api/admin/works/:id/listing — { action: 'approve' | 'deny' } on a
+ * held (or still-pending) listing request. Approve mirrors a chain pass;
+ * deny lands as refused with the operator's mark, so the author's manage
+ * page says who said no.
+ */
+async function decideListing(request: Request, env: Env, row: WorkRow): Promise<Response> {
+  const body = await readJsonBody(request);
+  if (body === null) return jsonError(400, 'invalid_body');
+  const action = body['action'];
+  if (action !== 'approve' && action !== 'deny') return jsonError(400, 'invalid_action');
+  if (row.listing_state !== 'held' && row.listing_state !== 'pending') {
+    return jsonError(409, 'no_listing_request');
   }
 
-  const bundle = await loadBundle(env, row.id);
-  if (bundle === null) return jsonError(409, 'bundle_missing');
-
-  bundle.rating = rating as PublishBundleV1['rating'];
-  bundle.warnings = warnings;
-  await bakeWork(bundle, row.id, env);
-
-  const updatedAt = new Date().toISOString();
-  await relabelWork(env.SHELF_DB, row.id, rating, warnings, updatedAt);
-  return Response.json({ ok: true, rating, warnings, updated_at: updatedAt });
+  if (action === 'approve') {
+    const listedAt = new Date().toISOString();
+    await setListingResolved(env.SHELF_DB, row.id, 'listed', listedAt, null);
+    return Response.json({ ok: true, listingState: 'listed', listed_at: listedAt });
+  }
+  await setListingResolved(env.SHELF_DB, row.id, 'refused', null, JSON.stringify({ reason: 'operator' }));
+  return Response.json({ ok: true, listingState: 'refused' });
 }
 
 async function setExpiry(request: Request, env: Env, row: WorkRow): Promise<Response> {
