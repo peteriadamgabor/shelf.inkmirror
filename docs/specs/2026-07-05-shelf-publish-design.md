@@ -229,6 +229,39 @@ Chrome on every page:
 - Footer: pen-name · published date · word count · "Report this work" link
   (→ `/api/works/:id/report` mini-form) · "Written with InkMirror" mark.
 
+### Chaptered reading
+
+- **Single-chapter works** (exactly one chapter after ordering, regardless
+  of kind) bake to one page at `works/{id}/index.html` — unchanged. A short
+  story never gains a TOC click.
+- **Multi-chapter works bake N+1 pages.** The cover at
+  `works/{id}/index.html` (`/w/:id`): title, pen name, rating badge +
+  warning chips, synopsis, front-matter prose (cover/dedication/epigraph
+  render right there, centered, per kind rules), a "Continue reading" slot,
+  and the TOC — an ordered list of the N body chapters (standard + back
+  matter, reading order) with per-chapter word counts (tabular-nums). Labels
+  fall back to "Chapter N" when the kind hides titles (`showsTitle`) or the
+  title is empty. The continue slot is `hidden` until inline JS finds
+  `localStorage['shelf.pos.{workId}']` (so it's also hidden under noscript)
+  and then links "Continue — {chapter title}" to `/w/:id/{n}`.
+- **Chapter pages** at `works/{id}/ch/{n}.html`, served at `/w/:id/{n}`
+  (n = 1–999; the route regex rejects `0`, leading zeros, and non-numeric —
+  styled 404). Slim header (work title → cover, "n / total"), compact
+  prev/next on top, the chapter's blocks exactly as the single page renders
+  them, prev/next at the bottom (prev of page 1 = the cover; the last page
+  shows a Contents link instead of next), the standard whole-work footer.
+  Inline JS stamps `localStorage['shelf.pos.{workId}'] = n` on load.
+- **Age gate on EVERY page** of a mature/explicit work — deep links must
+  gate. The localStorage ack keeps it one-time across pages.
+- **Views count only on the cover route.** Chapter fetches never increment
+  `views` — paging through a book is one open, not twelve. The `RL_VIEWS`
+  cooldown is unchanged.
+- **One bake pipeline:** `bakeWork()` (POST publish, PUT update, admin
+  relabel) renders all pages, writes them to R2, and deletes stale
+  `works/{id}/ch/*` beyond the new count — a re-push shrinking 12 → 9
+  chapters must not leave `/w/:id/10` serving. Unpublish and the purge cron
+  delete the whole `works/{id}/` prefix via R2 list, not fixed keys.
+
 ## InkMirror-side publish flow
 
 This part stays in the InkMirror repo regardless of the split — it is client
