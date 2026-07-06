@@ -1159,6 +1159,25 @@ describe('pages', () => {
     expect(res.headers.get('content-security-policy')).toContain("connect-src 'self'");
   });
 
+  it('landing and a not-found page localize to Magyar on ?lang=hu / Accept-Language', async () => {
+    const h = makeEnv();
+    const landing = await dispatch(h, new Request(`${BASE}/?lang=hu`));
+    const landingHtml = await landing.text();
+    expect(landingHtml).toContain('<html lang="hu">');
+    expect(landingHtml).toContain('A Polc'); // brand wordmark
+    expect(landingHtml).toContain('Böngészd a Polcot'); // ctaBrowse
+    expect(landingHtml).not.toContain('Browse the Shelf');
+
+    const missing = await dispatch(
+      h,
+      new Request(`${BASE}/w/AAAAAAAAAAAAAAAAAAAAAA`, { headers: { 'accept-language': 'hu-HU,hu;q=0.9' } }),
+    );
+    expect(missing.status).toBe(404);
+    const missingHtml = await missing.text();
+    expect(missingHtml).toContain('<html lang="hu">');
+    expect(missingHtml).toContain('Semmi sincs ezen a polcon'); // notFound.heading
+  });
+
   it('landing and rules render with the CSP', async () => {
     const h = makeEnv();
     const landing = await dispatch(h, new Request(`${BASE}/`));
@@ -1561,6 +1580,19 @@ describe('GET /w/:id/report — live report page', () => {
     expect(res.headers.get('content-security-policy')).not.toContain('challenges.cloudflare.com');
   });
 
+  it('a Hungarian work renders the report form in Magyar', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h, makeBundle({ language: 'hu' }));
+    const res = await dispatch(h, new Request(`${BASE}/w/${id}/report`));
+    const html = await res.text();
+    expect(html).toContain('<html lang="hu">');
+    expect(html).toContain('Mű jelentése'); // report.title
+    expect(html).toContain('Jelentés küldése'); // report.submit
+    expect(html).toContain('A Polc szabályai'); // report.rulesLink
+    expect(html).toContain('Vissza a műhöz'); // backToWork
+    expect(html).not.toContain('Report this work');
+  });
+
   it('embeds the Turnstile widget and relaxes CSP for this page only when both keys are set', async () => {
     const h = makeEnv({ TURNSTILE_SITE_KEY: 'site-key-1', TURNSTILE_SECRET_KEY: 'secret-key-1' });
     const { id } = await publish(h);
@@ -1764,6 +1796,18 @@ describe('password gate on reader routes', () => {
       expect(html, path).toContain(`name="next" value="${next}"`);
       expect(html, path).not.toContain('Second chapter prose.');
     }
+  });
+
+  it('a Hungarian work gates in Magyar', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h, makeBundle({ language: 'hu' }));
+    await putPassword(h, id, manageSecret, 'open sesame');
+    const res = await dispatch(h, new Request(`${BASE}/w/${id}`));
+    const html = await res.text();
+    expect(html).toContain('<html lang="hu">');
+    expect(html).toContain('Feloldás'); // gate.unlock
+    expect(html).toContain('A jelszót a szerző személyesen osztja meg.'); // gate.hint
+    expect(html).not.toContain('Unlock');
   });
 
   it('the manage page stays reachable without the password', async () => {
@@ -2053,6 +2097,17 @@ describe('GET /w/:id/letter — live letter page', () => {
     expect(html).toContain('class="cf-turnstile"');
     expect(html).toContain('data-sitekey="site-key-1"');
     expect(res.headers.get('content-security-policy')).toContain('challenges.cloudflare.com');
+  });
+
+  it('a Hungarian work renders the letter form in Magyar', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h, makeBundle({ language: 'hu' }));
+    const res = await dispatch(h, new Request(`${BASE}/w/${id}/letter`));
+    const html = await res.text();
+    expect(html).toContain('<html lang="hu">');
+    expect(html).toContain('Írj a szerzőnek'); // heading (read.foot.letter)
+    expect(html).toContain('Levél küldése'); // letter.submit
+    expect(html).not.toContain('Write to the author');
   });
 
   it('404s for an unknown or removed work', async () => {
