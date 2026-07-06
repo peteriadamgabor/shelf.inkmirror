@@ -16,6 +16,11 @@ import { RATINGS, WARNING_TAGS } from '../../format';
 import { htmlResponse, pageShell } from '../../html';
 
 const ADMIN_CSS = `
+/* An explicit display (flex/grid) on an element defeats the [hidden]
+   attribute — so force hidden to win everywhere on this page. Without
+   this, .paused-banner and the .inline-form editors (both display:flex)
+   would show even when their hidden attribute is set. */
+[hidden]{display:none!important}
 :root{
   --op-good:var(--teal);
   --op-warn:var(--amber);
