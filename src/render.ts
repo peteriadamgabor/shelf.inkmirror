@@ -24,7 +24,7 @@ import type {
   Rating,
   WarningTag,
 } from './format';
-import { escapeHtml, THEME_CSS } from './html';
+import { escapeHtml, FAVICON_DATA_URI, THEME_CSS } from './html';
 
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$/;
 const FALLBACK_ACCENT = 'var(--teal)';
@@ -412,6 +412,7 @@ ${opts.body}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <meta name="color-scheme" content="light dark">
+<link rel="icon" href="${FAVICON_DATA_URI}">
 <title>${escapeHtml(opts.docTitle)}</title>
 <style>${THEME_CSS}${READING_CSS}</style>
 </head>

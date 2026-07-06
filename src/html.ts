@@ -8,6 +8,10 @@
  * serif prose on warm cream, dark mode with the faint violet undertone.
  */
 
+/** Two hearts as the tab icon — writer violet, story ember. */
+export const FAVICON_DATA_URI =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='11' cy='16' r='7.5' fill='%237F77DD'/%3E%3Ccircle cx='22.5' cy='16' r='7.5' fill='%23D85A30' fill-opacity='.92'/%3E%3C/svg%3E";
+
 /** Escape a user string for interpolation into HTML text or attributes. */
 export function escapeHtml(s: string): string {
   return s
@@ -110,6 +114,7 @@ export function pageShell(opts: ShellOpts): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <meta name="color-scheme" content="light dark">
+<link rel="icon" href="${FAVICON_DATA_URI}">
 <title>${escapeHtml(opts.title)}</title>
 <style>${THEME_CSS}${SHELL_CSS}${opts.css ?? ''}</style>
 ${opts.head ?? ''}</head>
