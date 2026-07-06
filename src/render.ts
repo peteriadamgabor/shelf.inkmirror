@@ -27,6 +27,9 @@ import type {
 import { escapeHtml, FAVICON_DATA_URI, THEME_CSS } from './html';
 
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$/;
+
+/** Works can be written in any language; right-to-left scripts flip the page. */
+const RTL_LANGUAGES = new Set(['ar', 'he', 'fa', 'ur', 'ps', 'dv', 'yi']);
 const FALLBACK_ACCENT = 'var(--teal)';
 const POV_ACCENT = 'var(--violet)';
 
@@ -394,8 +397,9 @@ ${opts.body}
   const js = `${gated ? AGE_GATE_JS : ''}${opts.script ?? ''}`;
   const script = js.length > 0 ? `<script>${js}</script>\n` : '';
 
+  const rtl = RTL_LANGUAGES.has(bundle.language.toLowerCase().split('-')[0] ?? '');
   return `<!doctype html>
-<html lang="${escapeHtml(bundle.language)}">
+<html lang="${escapeHtml(bundle.language)}"${rtl ? ' dir="rtl"' : ''}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
