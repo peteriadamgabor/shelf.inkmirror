@@ -38,7 +38,7 @@ import {
   upsertTombstone,
   type WorkRow,
 } from '../lib/db';
-import { parseModerationVerdict } from '../lib/moderation';
+import { chainDailyCap, chainRunsKey, parseModerationVerdict } from '../lib/moderation';
 import { parseListingVerdict } from '../lib/listing';
 import { parseLabels, relabelAndRebake } from '../lib/relabel';
 import { WORK_ID_RE, clientIp, jsonError, readBodyCapped } from '../lib/http';
@@ -122,7 +122,7 @@ async function loadBundle(env: Env, id: string): Promise<PublishBundleV1 | null>
 
 async function overview(env: Env): Promise<Response> {
   const db = env.SHELF_DB;
-  const [works, views, recentWorks, recentReports, held, paused, tombstones] = await Promise.all([
+  const [works, views, recentWorks, recentReports, held, paused, tombstones, chainUsed] = await Promise.all([
     countWorksByStatus(db),
     totalViews(db),
     listRecentWorks(db, RECENT_LIMIT),
@@ -130,10 +130,16 @@ async function overview(env: Env): Promise<Response> {
     listHeldListings(db, HELD_LIMIT),
     getSetting(db, PAUSED_KEY),
     listTombstones(db, 100),
+    getSetting(db, chainRunsKey()),
   ]);
   return Response.json({
     works,
     totalViews: views,
+    // Today's chain-run spend against the global daily cap (UTC-keyed).
+    chainBudget: {
+      cap: chainDailyCap(env.CHAIN_DAILY_CAP),
+      usedToday: chainUsed === null ? 0 : Number(chainUsed) || 0,
+    },
     recentWorks,
     recentReports,
     // The operator's queue: listing requests waiting on a human decision.

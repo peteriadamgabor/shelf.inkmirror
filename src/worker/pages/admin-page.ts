@@ -36,6 +36,7 @@ const ADMIN_CSS = `
 .tag-mod-tag-fix{color:var(--amber)}
 .tag-mod-pass{color:var(--muted)}
 .tag-mod-error{color:var(--muted);font-style:italic}
+.tag-mod-skipped{color:var(--muted);font-style:italic}
 .tag-shelf-listed{color:var(--violet);border-color:color-mix(in srgb,var(--violet) 45%,transparent)}
 .tag-shelf-pending{color:var(--muted)}
 .tag-shelf-held{color:var(--ember);border-color:color-mix(in srgb,var(--ember) 45%,transparent)}
@@ -152,7 +153,8 @@ function render(o){
   var pauseBtn=$('btn-pause');
   pauseBtn.textContent=o.publishingPaused?'Resume publishing':'Pause publishing (panic)';
   var stats=$('stats');stats.textContent='';
-  var pairs=[['Active',o.works.active||0],['Held',o.works.held||0],['Removed',o.works.removed||0],['Total opens',o.totalViews]];
+  var cb=o.chainBudget||{cap:0,usedToday:0};
+  var pairs=[['Active',o.works.active||0],['Held',o.works.held||0],['Removed',o.works.removed||0],['Total opens',o.totalViews],['Chain today',cb.usedToday+'/'+cb.cap]];
   pairs.forEach(function(p){
     var s=el('div','stat');s.appendChild(el('div','v nums',String(p[1])));s.appendChild(el('div','k',p[0]));stats.appendChild(s);
   });
