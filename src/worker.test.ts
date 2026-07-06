@@ -134,7 +134,17 @@ class FakeStatement {
         updated_at: String(updated_at),
         expires_at: String(expires_at),
         removed_at: null,
+        moderation_verdict: null,
+        moderation_at: null,
       });
+      return { success: true };
+    }
+    if (s.includes('SET moderation_verdict')) {
+      const row = this.works.get(String(a[2]));
+      if (row) {
+        row.moderation_verdict = String(a[0]);
+        row.moderation_at = String(a[1]);
+      }
       return { success: true };
     }
     if (s.includes('SET views = views + 1')) {
@@ -305,6 +315,7 @@ class FakeStatement {
           id: w.id, title: w.title, pen_name: w.pen_name, rating: w.rating,
           word_count: w.word_count, views: w.views, report_count: w.report_count,
           status: w.status, password_protected: w.password_hash !== null ? 1 : 0,
+          moderation_verdict: w.moderation_verdict,
           created_at: w.created_at, expires_at: w.expires_at,
         }) as T);
       return { results };
@@ -1874,5 +1885,313 @@ describe('author inbox — GET/DELETE /api/works/:id/letters', () => {
     const { id } = await publish(h);
     expect(h.r2.store.get(`works/${id}/index.html`)).toContain(`href="/w/${id}/letter"`);
     expect(h.r2.store.get(`works/${id}/index.html`)).toContain('Write to the author');
+  });
+});
+
+// ---------- Phase 2 moderation chain (SHADOW MODE) ----------
+
+interface CapturedCall {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown> | null;
+}
+
+function anthropicToolUse(name: string, input: unknown): Response {
+  return Response.json({
+    id: 'msg_test',
+    type: 'message',
+    role: 'assistant',
+    model: 'test-model',
+    stop_reason: 'tool_use',
+    content: [{ type: 'tool_use', id: 'toolu_1', name, input }],
+    usage: { input_tokens: 1, output_tokens: 1 },
+  });
+}
+
+function toolChoiceName(c: CapturedCall): unknown {
+  return (c.body?.['tool_choice'] as Record<string, unknown> | undefined)?.['name'];
+}
+
+function userMessageText(body: Record<string, unknown> | null): string {
+  const messages = body?.['messages'];
+  if (!Array.isArray(messages)) return '';
+  const first = messages[0] as Record<string, unknown> | undefined;
+  return typeof first?.['content'] === 'string' ? first['content'] : '';
+}
+
+/**
+ * Stubs globalThis.fetch with a dispatcher that answers api.anthropic.com
+ * with canned forced-tool-use replies and everything else (Discord) with 200.
+ * The real API is never touched in tests.
+ */
+function stubModerationFetch(opts: {
+  /** Per-chunk router flags; default = no flags anywhere. */
+  routerFlags?: (chunkNo: number, messageText: string) => string[];
+  /** Canned verify_work tool input. */
+  verifier?: unknown;
+  /** Force every anthropic call to this HTTP status (error-path tests). */
+  anthropicStatus?: number;
+  /** Runs on every anthropic call (e.g. simulate unpublish mid-run). */
+  onAnthropic?: () => void;
+}): { calls: CapturedCall[] } {
+  const calls: CapturedCall[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      let body: Record<string, unknown> | null = null;
+      if (typeof init?.body === 'string') {
+        try {
+          body = JSON.parse(init.body) as Record<string, unknown>;
+        } catch {
+          body = null;
+        }
+      }
+      calls.push({ url, headers: (init?.headers ?? {}) as Record<string, string>, body });
+
+      if (url.startsWith('https://api.anthropic.com')) {
+        opts.onAnthropic?.();
+        if (opts.anthropicStatus !== undefined) {
+          return new Response('{"type":"error"}', { status: opts.anthropicStatus });
+        }
+        const tool = toolChoiceName({ url, headers: {}, body });
+        if (tool === 'route_chunks') {
+          const text = userMessageText(body);
+          const nums = [...text.matchAll(/--- CHUNK (\d+) ---/g)].map((m) => Number(m[1]));
+          return anthropicToolUse('route_chunks', {
+            results: nums.map((n) => ({ chunk: n, flags: opts.routerFlags?.(n, text) ?? [] })),
+          });
+        }
+        if (tool === 'verify_work') {
+          return anthropicToolUse(
+            'verify_work',
+            opts.verifier ?? {
+              hardLine: 'none',
+              reason: '',
+              labels: 'honest',
+              suggested: { rating: 'general', warnings: [] },
+            },
+          );
+        }
+        return new Response('{"type":"error"}', { status: 500 });
+      }
+      return new Response('ok', { status: 200 });
+    }),
+  );
+  return { calls };
+}
+
+const anthropicCalls = (calls: CapturedCall[]): CapturedCall[] =>
+  calls.filter((c) => c.url.startsWith('https://api.anthropic.com'));
+const discordCalls = (calls: CapturedCall[]): CapturedCall[] =>
+  calls.filter((c) => c.url.includes('discord'));
+
+/** A bundle big enough (>200 chars of prose) to enter the chain. */
+function makeModeratedBundle(prose?: string): PublishBundleV1 {
+  const content =
+    prose ?? 'The rain kept its own counsel over the rooftops of the sleeping town. '.repeat(6);
+  return makeBundle({
+    blocks: [
+      { id: 'b1', chapter_id: 'ch1', type: 'text', content, order: 0, metadata: { type: 'text' } },
+    ],
+  });
+}
+
+function storedVerdict(h: Harness, id: string): Record<string, unknown> | null {
+  const raw = h.d1.works.get(id)?.moderation_verdict ?? null;
+  return raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
+}
+
+describe('moderation chain (shadow mode)', () => {
+  it('without ANTHROPIC_API_KEY the chain is a complete no-op: no calls, no verdict', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({ DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id } = await publish(h, makeModeratedBundle());
+    expect(calls).toHaveLength(0);
+    const row = h.d1.works.get(id);
+    expect(row?.moderation_verdict).toBeNull();
+    expect(row?.moderation_at).toBeNull();
+  });
+
+  it('tiny work (<200 chars) is skipped: no calls, no verdict', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { id } = await publish(h); // default bundle: ~40 chars of prose
+    expect(anthropicCalls(calls)).toHaveLength(0);
+    expect(h.d1.works.get(id)?.moderation_verdict).toBeNull();
+  });
+
+  it('happy pass: router-only run, verdict stored, no Discord noise', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id } = await publish(h, makeModeratedBundle());
+
+    const verdict = storedVerdict(h, id);
+    expect(verdict?.['outcome']).toBe('pass');
+    expect(verdict?.['truncated']).toBe(false);
+    expect(verdict?.['flaggedChunks']).toBe(0);
+    expect(typeof verdict?.['ms']).toBe('number');
+    expect(h.d1.works.get(id)?.moderation_at).toBeTruthy();
+
+    const api = anthropicCalls(calls);
+    expect(api.length).toBeGreaterThan(0);
+    // Every call is the cheap router — no verifier spend on a clean work.
+    expect(api.every((c) => toolChoiceName(c) === 'route_chunks')).toBe(true);
+    expect(api[0]?.headers['x-api-key']).toBe('sk-test');
+    expect(api[0]?.headers['anthropic-version']).toBe('2023-06-01');
+    expect(api[0]?.body?.['model']).toBe('claude-haiku-4-5');
+    expect(discordCalls(calls)).toHaveLength(0);
+  });
+
+  it('under-labeled → tag-fix verdict + Discord embed + suggestion in the admin surface', async () => {
+    const { calls } = stubModerationFetch({
+      routerFlags: () => ['sexual-explicit'],
+      verifier: {
+        hardLine: 'none',
+        reason: 'the excerpt is explicit: "against the harbor wall"',
+        labels: 'under-labeled',
+        suggested: { rating: 'explicit', warnings: ['sexual-content'] },
+      },
+    });
+    const h = makeEnv({
+      ANTHROPIC_API_KEY: 'sk-test',
+      DISCORD_WEBHOOK: 'https://discord.example/hook',
+      ADMIN_SECRET,
+    });
+    const { id } = await publish(h, makeModeratedBundle());
+
+    const verdict = storedVerdict(h, id);
+    expect(verdict?.['outcome']).toBe('tag-fix');
+    expect(verdict?.['suggested']).toEqual({ rating: 'explicit', warnings: ['sexual-content'] });
+
+    const api = anthropicCalls(calls);
+    expect(api.some((c) => toolChoiceName(c) === 'verify_work')).toBe(true);
+    expect(api.find((c) => toolChoiceName(c) === 'verify_work')?.body?.['model']).toBe('claude-sonnet-5');
+
+    const discord = discordCalls(calls);
+    expect(discord).toHaveLength(1);
+    const payload = JSON.stringify(discord[0]?.body);
+    expect(payload).toContain('tag-fix');
+    expect(payload).toContain('SHADOW MODE');
+    expect(payload).toContain('explicit');
+
+    // Admin overview row carries the outcome…
+    const overview = await adminGet(h, '/api/admin/overview');
+    const o = (await overview.json()) as { recentWorks: { id: string; moderation_outcome: string | null }[] };
+    expect(o.recentWorks.find((w) => w.id === id)?.moderation_outcome).toBe('tag-fix');
+
+    // …and the detail carries the parsed verdict with the suggestion.
+    const detail = await adminGet(h, `/api/admin/works/${id}`);
+    expect(detail.status).toBe(200);
+    const d = (await detail.json()) as {
+      work: { moderation: { outcome: string; suggested?: { rating: string; warnings: string[] } } | null };
+    };
+    expect(d.work.moderation?.outcome).toBe('tag-fix');
+    expect(d.work.moderation?.suggested?.rating).toBe('explicit');
+    expect(d.work.moderation?.suggested?.warnings).toEqual(['sexual-content']);
+  });
+
+  it('hard-line flag → hold verdict + Discord ping (and nothing blocked)', async () => {
+    const { calls } = stubModerationFetch({
+      routerFlags: () => ['minors'],
+      verifier: {
+        hardLine: 'minors',
+        reason: 'the quoted scene sexualizes a character stated to be 12',
+        labels: 'honest',
+        suggested: { rating: 'general', warnings: [] },
+      },
+    });
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id } = await publish(h, makeModeratedBundle());
+
+    const verdict = storedVerdict(h, id);
+    expect(verdict?.['outcome']).toBe('hold');
+    expect(verdict?.['reason']).toContain('12');
+
+    const discord = discordCalls(calls);
+    expect(discord).toHaveLength(1);
+    expect(JSON.stringify(discord[0]?.body)).toContain('hold');
+    expect(JSON.stringify(discord[0]?.body)).toContain('SHADOW MODE');
+
+    // Shadow mode: the work is still fully published and readable.
+    expect(h.d1.works.get(id)?.status).toBe('active');
+    expect(h.r2.store.has(`works/${id}/index.html`)).toBe(true);
+  });
+
+  it('API 500 → error verdict stored; the publish response is untouched', async () => {
+    stubModerationFetch({ anthropicStatus: 500 });
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const out = await publish(h, makeModeratedBundle()); // asserts 200 inside
+    expect(out.id).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    expect(out.manageSecret.length).toBeGreaterThanOrEqual(43);
+
+    const verdict = storedVerdict(h, out.id);
+    expect(verdict?.['outcome']).toBe('error');
+    expect(String(verdict?.['reason'])).toContain('500');
+  });
+
+  it('unpublish mid-run: verdict write no-ops silently, nothing throws', async () => {
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    stubModerationFetch({ onAnthropic: () => h.d1.works.clear() });
+    // dispatch() drains waitUntil — resolving at all is the "doesn't throw".
+    const { id } = await publish(h, makeModeratedBundle());
+    expect(h.d1.works.has(id)).toBe(false);
+  });
+
+  it('manage update (PUT) re-runs the chain on the new text', async () => {
+    const { calls } = stubModerationFetch({
+      routerFlags: (_n, text) => (text.includes('unlabeled-heat') ? ['sexual-explicit'] : []),
+      verifier: {
+        hardLine: 'none',
+        reason: '',
+        labels: 'under-labeled',
+        suggested: { rating: 'mature', warnings: ['sexual-content'] },
+      },
+    });
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    expect(storedVerdict(h, id)?.['outcome']).toBe('pass');
+    const callsAfterPublish = anthropicCalls(calls).length;
+
+    const updated = makeModeratedBundle(
+      'And then, unlabeled-heat, the chapter turned explicit without a warning tag. '.repeat(5),
+    );
+    const res = await dispatch(
+      h,
+      new Request(`${BASE}/api/works/${id}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-manage-secret': manageSecret },
+        body: JSON.stringify(updated),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(anthropicCalls(calls).length).toBeGreaterThan(callsAfterPublish);
+    expect(storedVerdict(h, id)?.['outcome']).toBe('tag-fix');
+  });
+
+  it('the publish HTTP response is identical in shape with and without the key configured', async () => {
+    stubModerationFetch({});
+    const bare = makeEnv();
+    const keyed = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const post = (): Request =>
+      new Request(`${BASE}/api/publish`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(makeModeratedBundle()),
+      });
+
+    const r1 = await dispatch(bare, post());
+    const r2 = await dispatch(keyed, post());
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+
+    const b1 = (await r1.json()) as Record<string, unknown>;
+    const b2 = (await r2.json()) as Record<string, unknown>;
+    expect(Object.keys(b1).sort()).toEqual(Object.keys(b2).sort());
+    for (const b of [b1, b2]) {
+      expect(String(b['id'])).toMatch(/^[A-Za-z0-9_-]{22}$/);
+      expect(String(b['url'])).toBe(`${BASE}/w/${String(b['id'])}`);
+      expect(String(b['manageSecret']).length).toBeGreaterThanOrEqual(43);
+    }
   });
 });
