@@ -19,8 +19,17 @@ import { escapeHtml, htmlResponse, pageShell } from '../../html';
 import { randomBase64Url } from '../lib/crypto';
 import { incrementReportCount, insertReport } from '../lib/db';
 import { MAX_REPORT_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
+import { langForWork, t, type Lang } from '../i18n';
 import { workUrl } from './publish';
-import { getActiveWork, notFoundPage, passwordGate } from './read';
+import { getActiveWork, notFoundLang, notFoundPage, passwordGate } from './read';
+
+/** Render an intro string whose {rules} token expands to the House-rules link. */
+function withRulesLink(lang: Lang, key: string): string {
+  return t(lang, key).replace(
+    '{rules}',
+    `<a href="/rules">${escapeHtml(t(lang, 'report.rulesLink'))}</a>`,
+  );
+}
 
 export const REPORT_REASONS = new Set(['mislabeled', 'hard-line', 'plagiarism', 'other']);
 const MAX_MESSAGE = 1000;
@@ -58,16 +67,16 @@ interface ReportFields {
   turnstileToken: string;
 }
 
-function confirmationPage(workId: string): Response {
+function confirmationPage(workId: string, lang: Lang): Response {
   return htmlResponse(
     pageShell({
-      title: 'Report received — The Shelf',
+      title: `${t(lang, 'report.receivedTab')} — ${t(lang, 'brand')}`,
+      lang,
       body: `<div class="page">
-<h1>Thank you</h1>
-<p>Your report has been received — a human will look at this.</p>
-<p class="muted small">Reports are reviewed against the <a href="/rules">Shelf rules</a>. Mislabeling and hard-line
-violations are acted on; disliking a story is not a violation.</p>
-<p><a class="btn" href="/w/${escapeHtml(workId)}">Back to the work</a></p>
+<h1>${escapeHtml(t(lang, 'report.thankYou'))}</h1>
+<p>${escapeHtml(t(lang, 'report.received'))}</p>
+<p class="muted small">${withRulesLink(lang, 'report.confirmIntro')}</p>
+<p><a class="btn" href="/w/${escapeHtml(workId)}">${escapeHtml(t(lang, 'backToWork'))}</a></p>
 </div>`,
     }),
   );
@@ -155,7 +164,10 @@ export async function handleReport(request: Request, env: Env, id: string): Prom
   if (parsed === null) return jsonError(400, 'invalid_body');
   const { fields, isJson } = parsed;
 
-  const ok = (): Response => (isJson ? Response.json({ ok: true }) : confirmationPage(id));
+  // The confirmation page speaks the work's language; until the row is in hand
+  // (bot trip-wires fire first) English is the safe default.
+  let lang: Lang = 'en';
+  const ok = (): Response => (isJson ? Response.json({ ok: true }) : confirmationPage(id, lang));
 
   // Honeypot filled, or the render-time gate failed → silent success, nothing stored.
   if (fields.website.trim().length > 0) return ok();
@@ -165,6 +177,7 @@ export async function handleReport(request: Request, env: Env, id: string): Prom
   // is not active — no orphan reports, no oracle (silent success either way).
   const work = await getActiveWork(env, id);
   if (work === null) return ok();
+  lang = langForWork(work.language);
 
   if (turnstileEnabled(env) && !(await verifyTurnstile(env, fields.turnstileToken, ip))) {
     return jsonError(403, 'verification_failed');
@@ -258,14 +271,14 @@ export const TURNSTILE_CSP =
  */
 export async function reportPage(request: Request, env: Env, id: string): Promise<Response> {
   const row = await getActiveWork(env, id);
-  if (row === null) return notFoundPage();
+  if (row === null) return notFoundPage(notFoundLang(request));
   // Locked works gate their report page too — the form names the work.
   const gate = await passwordGate(request, row, `/w/${id}/report`);
   if (gate !== null) return gate;
-  return buildReportPage(env, id, row.title, row.pen_name);
+  return buildReportPage(env, id, row.title, row.pen_name, langForWork(row.language));
 }
 
-function buildReportPage(env: Env, id: string, title: string, penName: string): Response {
+function buildReportPage(env: Env, id: string, title: string, penName: string, lang: Lang): Response {
   const withTurnstile = turnstileEnabled(env);
   const widget = withTurnstile
     ? `<div class="cf-turnstile" data-sitekey="${escapeHtml(env.TURNSTILE_SITE_KEY ?? '')}"></div>`
@@ -275,33 +288,32 @@ function buildReportPage(env: Env, id: string, title: string, penName: string): 
     : '';
 
   const body = `<div class="page">
-<h1>Report this work</h1>
-<p class="work-ref">&ldquo;${escapeHtml(title)}&rdquo; by ${escapeHtml(penName)}</p>
-<p class="muted small">Reports are reviewed against the <a href="/rules">Shelf rules</a> by a human.
-Mislabeling and hard-line violations are acted on; disliking a story is not a violation.</p>
+<h1>${escapeHtml(t(lang, 'report.title'))}</h1>
+<p class="work-ref">&ldquo;${escapeHtml(title)}&rdquo; ${escapeHtml(t(lang, 'by'))} ${escapeHtml(penName)}</p>
+<p class="muted small">${withRulesLink(lang, 'report.formIntro')}</p>
 <form method="post" action="/api/works/${escapeHtml(id)}/report" class="report-form">
-<label>Reason
+<label>${escapeHtml(t(lang, 'report.reasonLabel'))}
 <select name="reason" required>
-<option value="mislabeled">Mislabeled (rating or warnings are dishonest)</option>
-<option value="hard-line">Hard-line content (minors / doxxing / illegal)</option>
-<option value="plagiarism">Plagiarism</option>
-<option value="other">Other</option>
+<option value="mislabeled">${escapeHtml(t(lang, 'report.reasonMislabeled'))}</option>
+<option value="hard-line">${escapeHtml(t(lang, 'report.reasonHardLine'))}</option>
+<option value="plagiarism">${escapeHtml(t(lang, 'report.reasonPlagiarism'))}</option>
+<option value="other">${escapeHtml(t(lang, 'report.reasonOther'))}</option>
 </select>
 </label>
-<label>Details (optional)
+<label>${escapeHtml(t(lang, 'report.detailsLabel'))}
 <textarea name="message" maxlength="1000" rows="5"></textarea>
 </label>
 <input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
 <input type="hidden" name="ts" id="report-ts" value="">
 ${widget}
-<button type="submit" class="btn">Send report</button>
+<button type="submit" class="btn">${escapeHtml(t(lang, 'report.submit'))}</button>
 </form>
-<p class="muted small"><a href="/w/${escapeHtml(id)}">Back to the work</a></p>
+<p class="muted small"><a href="/w/${escapeHtml(id)}">${escapeHtml(t(lang, 'backToWork'))}</a></p>
 </div>
 <script>${REPORT_TS_JS}</script>`;
 
   return htmlResponse(
-    pageShell({ title: 'Report — The Shelf', css: FORM_PAGE_CSS, body, head }),
+    pageShell({ title: `${t(lang, 'report.tab')} — ${t(lang, 'brand')}`, lang, css: FORM_PAGE_CSS, body, head }),
     200,
     withTurnstile ? { 'content-security-policy': TURNSTILE_CSP } : undefined,
   );

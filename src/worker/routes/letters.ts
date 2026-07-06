@@ -26,8 +26,9 @@ import { escapeHtml, htmlResponse, pageShell } from '../../html';
 import { randomBase64Url } from '../lib/crypto';
 import { evictLettersBeyond, insertLetter } from '../lib/db';
 import { MAX_REPORT_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
+import { langForWork, t, type Lang } from '../i18n';
 import { FORM_PAGE_CSS, TURNSTILE_CSP, tsFresh, turnstileEnabled, verifyTurnstile } from './report';
-import { getActiveWork, notFoundPage, passwordGate } from './read';
+import { getActiveWork, notFoundLang, notFoundPage, passwordGate } from './read';
 
 export const MAX_LETTER_BODY = 4000;
 export const MAX_LETTER_CONTACT = 200;
@@ -85,15 +86,16 @@ async function parseFields(request: Request): Promise<{ fields: LetterFields; is
   };
 }
 
-function sentPage(workId: string): Response {
+function sentPage(workId: string, lang: Lang): Response {
   return htmlResponse(
     pageShell({
-      title: 'Letter sent — The Shelf',
+      title: `${t(lang, 'letter.sentTab')} — ${t(lang, 'brand')}`,
+      lang,
       body: `<div class="page">
-<h1>Sent</h1>
-<p>Your letter is on its way to the author.</p>
-<p class="muted small">Letters go privately to the writer — one way, no threads, nothing public.</p>
-<p><a class="btn" href="/w/${escapeHtml(workId)}">Back to the work</a></p>
+<h1>${escapeHtml(t(lang, 'letter.sent'))}</h1>
+<p>${escapeHtml(t(lang, 'letter.sentBody'))}</p>
+<p class="muted small">${escapeHtml(t(lang, 'letter.sentNote'))}</p>
+<p><a class="btn" href="/w/${escapeHtml(workId)}">${escapeHtml(t(lang, 'backToWork'))}</a></p>
 </div>`,
     }),
   );
@@ -111,10 +113,11 @@ export async function handleLetterSubmit(request: Request, env: Env, id: string)
   // Closed mailbox and unknown work are the SAME 404 — no oracle.
   const row = await getActiveWork(env, id);
   if (row === null || row.letters_open !== 1) {
-    return isJson ? jsonError(404, 'not_found') : notFoundPage();
+    return isJson ? jsonError(404, 'not_found') : notFoundPage(notFoundLang(request));
   }
+  const lang = langForWork(row.language);
 
-  const ok = (): Response => (isJson ? Response.json({ ok: true }) : sentPage(id));
+  const ok = (): Response => (isJson ? Response.json({ ok: true }) : sentPage(id, lang));
 
   // Honeypot filled, or the render-time gate failed → silent success, nothing stored.
   if (fields.website.trim().length > 0) return ok();
@@ -156,14 +159,14 @@ const LETTER_TS_JS = `(function(){var f=document.getElementById('letter-ts');if(
  */
 export async function letterPage(request: Request, env: Env, id: string): Promise<Response> {
   const row = await getActiveWork(env, id);
-  if (row === null) return notFoundPage();
+  if (row === null) return notFoundPage(notFoundLang(request));
   const gate = await passwordGate(request, row, `/w/${id}/letter`);
   if (gate !== null) return gate;
-  if (row.letters_open !== 1) return notFoundPage();
-  return buildLetterPage(env, id, row.title, row.pen_name);
+  if (row.letters_open !== 1) return notFoundPage(notFoundLang(request));
+  return buildLetterPage(env, id, row.title, row.pen_name, langForWork(row.language));
 }
 
-function buildLetterPage(env: Env, id: string, title: string, penName: string): Response {
+function buildLetterPage(env: Env, id: string, title: string, penName: string, lang: Lang): Response {
   const withTurnstile = turnstileEnabled(env);
   const widget = withTurnstile
     ? `<div class="cf-turnstile" data-sitekey="${escapeHtml(env.TURNSTILE_SITE_KEY ?? '')}"></div>`
@@ -172,30 +175,34 @@ function buildLetterPage(env: Env, id: string, title: string, penName: string): 
     ? '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>'
     : '';
 
+  const heading = t(lang, 'read.foot.letter'); // "Write to the author" / "Írj a szerzőnek"
+  const hardLine = t(lang, 'letter.hardLine').replace(
+    '{link}',
+    `<a href="/rules">${escapeHtml(t(lang, 'letter.hardLineLink'))}</a>`,
+  );
   const body = `<div class="page">
-<h1>Write to the author</h1>
-<p class="work-ref">&ldquo;${escapeHtml(title)}&rdquo; by ${escapeHtml(penName)}</p>
-<p class="muted small">Your letter goes privately to the writer — one way, no threads, nothing public.
-They only see what you type below.</p>
+<h1>${escapeHtml(heading)}</h1>
+<p class="work-ref">&ldquo;${escapeHtml(title)}&rdquo; ${escapeHtml(t(lang, 'by'))} ${escapeHtml(penName)}</p>
+<p class="muted small">${escapeHtml(t(lang, 'letter.intro'))}</p>
 <form method="post" action="/api/works/${escapeHtml(id)}/letters" class="report-form">
-<label>Your letter
+<label>${escapeHtml(t(lang, 'letter.bodyLabel'))}
 <textarea name="body" maxlength="${MAX_LETTER_BODY}" rows="8" required></textarea>
 </label>
-<label>Where to answer (optional)
-<input type="text" name="contact" maxlength="${MAX_LETTER_CONTACT}" placeholder="only if you&#39;d like an answer">
+<label>${escapeHtml(t(lang, 'letter.contactLabel'))}
+<input type="text" name="contact" maxlength="${MAX_LETTER_CONTACT}" placeholder="${t(lang, 'letter.contactPlaceholder')}">
 </label>
 <input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
 <input type="hidden" name="ts" id="letter-ts" value="">
 ${widget}
-<button type="submit" class="btn">Send letter</button>
+<button type="submit" class="btn">${escapeHtml(t(lang, 'letter.submit'))}</button>
 </form>
-<p class="muted small">Letters that cross a <a href="/rules">hard line</a> can still be reported by their recipient.</p>
-<p class="muted small"><a href="/w/${escapeHtml(id)}">Back to the work</a></p>
+<p class="muted small">${hardLine}</p>
+<p class="muted small"><a href="/w/${escapeHtml(id)}">${escapeHtml(t(lang, 'backToWork'))}</a></p>
 </div>
 <script>${LETTER_TS_JS}</script>`;
 
   return htmlResponse(
-    pageShell({ title: 'Write to the author — The Shelf', css: FORM_PAGE_CSS, body, head }),
+    pageShell({ title: `${heading} — ${t(lang, 'brand')}`, lang, css: FORM_PAGE_CSS, body, head }),
     200,
     withTurnstile ? { 'content-security-policy': TURNSTILE_CSP } : undefined,
   );
