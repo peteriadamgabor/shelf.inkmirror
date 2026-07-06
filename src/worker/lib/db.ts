@@ -95,6 +95,17 @@ export async function deleteWork(db: D1Database, id: string): Promise<void> {
   await db.prepare('DELETE FROM works WHERE id = ?1').bind(id).run();
   // Reports about a gone work carry no weight and no context — evaporate too.
   await db.prepare('DELETE FROM reports WHERE work_id = ?1').bind(id).run();
+  // Letters are the author's private mail; when the work goes, they go.
+  await db.prepare('DELETE FROM letters WHERE work_id = ?1').bind(id).run();
+}
+
+/** Set (pbkdf2$... string) or clear (null) the work's password gate. */
+export async function setPasswordHash(db: D1Database, id: string, hash: string | null): Promise<void> {
+  await db.prepare('UPDATE works SET password_hash = ?1 WHERE id = ?2').bind(hash, id).run();
+}
+
+export async function setLettersOpen(db: D1Database, id: string, open: boolean): Promise<void> {
+  await db.prepare('UPDATE works SET letters_open = ?1 WHERE id = ?2').bind(open ? 1 : 0, id).run();
 }
 
 export async function renewWork(db: D1Database, id: string, expiresAt: string): Promise<void> {
@@ -149,6 +160,60 @@ export function workPrefix(id: string): string {
   return `works/${id}/`;
 }
 
+// ---------- letters (reader → author, private) ----------
+
+export interface LetterRow {
+  id: string;
+  work_id: string;
+  body: string;
+  contact: string;
+  created_at: string;
+}
+
+/** The shape the author sees — work_id is implied by the route. */
+export interface AuthorLetter {
+  id: string;
+  body: string;
+  contact: string;
+  created_at: string;
+}
+
+export async function insertLetter(db: D1Database, l: LetterRow): Promise<void> {
+  await db
+    .prepare('INSERT INTO letters (id, work_id, body, contact, created_at) VALUES (?1, ?2, ?3, ?4, ?5)')
+    .bind(l.id, l.work_id, l.body, l.contact, l.created_at)
+    .run();
+}
+
+/** Newest first (rowid breaks same-millisecond ties). */
+export async function listLetters(db: D1Database, workId: string, limit: number): Promise<AuthorLetter[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT id, body, contact, created_at FROM letters
+       WHERE work_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT ?2`,
+    )
+    .bind(workId, limit)
+    .all<AuthorLetter>();
+  return results;
+}
+
+export async function deleteLetter(db: D1Database, workId: string, letterId: string): Promise<void> {
+  await db.prepare('DELETE FROM letters WHERE id = ?1 AND work_id = ?2').bind(letterId, workId).run();
+}
+
+/** Per-work storage cap: evict the oldest rows beyond `keep`. */
+export async function evictLettersBeyond(db: D1Database, workId: string, keep: number): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM letters WHERE work_id = ?1 AND id NOT IN (
+         SELECT id FROM letters WHERE work_id = ?1
+         ORDER BY created_at DESC, rowid DESC LIMIT ?2
+       )`,
+    )
+    .bind(workId, keep)
+    .run();
+}
+
 // ---------- operator toolkit (Phase 1.5) ----------
 
 export interface AdminWorkSummary {
@@ -160,6 +225,8 @@ export interface AdminWorkSummary {
   views: number;
   report_count: number;
   status: string;
+  /** 0/1 — whether a password gate is set (the hash itself never leaves). */
+  password_protected: number;
   created_at: string;
   expires_at: string;
 }
@@ -206,7 +273,8 @@ export async function listRecentWorks(db: D1Database, limit: number): Promise<Ad
   const { results } = await db
     .prepare(
       `SELECT id, title, pen_name, rating, word_count, views, report_count,
-              status, created_at, expires_at
+              status, (password_hash IS NOT NULL) AS password_protected,
+              created_at, expires_at
        FROM works ORDER BY created_at DESC LIMIT ?1`,
     )
     .bind(limit)

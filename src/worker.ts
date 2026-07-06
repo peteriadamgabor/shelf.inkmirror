@@ -1,18 +1,26 @@
 /**
  * The Shelf — Cloudflare Worker entry (shelf.inkmirror.cc).
  *
- * Routes (Phase 1 + 1.5):
+ * Routes (Phase 1 + 1.5 + password tier + letters):
  *   POST   /api/publish           validate + gates + bake + store → { id, url, manageSecret }
- *   GET    /api/works/:id         meta JSON                      [X-Manage-Secret]
+ *   GET    /api/works/:id         meta JSON (incl. passwordProtected) [X-Manage-Secret]
  *   PUT    /api/works/:id         replace content (re-bake)      [X-Manage-Secret]
  *   DELETE /api/works/:id         unpublish                      [X-Manage-Secret]
  *   POST   /api/works/:id/renew   push expiry +30d               [X-Manage-Secret]
+ *   PUT    /api/works/:id/password  set/clear the reading password [X-Manage-Secret]
  *   POST   /api/works/:id/report  rule-violation report → D1 + Discord webhook
+ *   POST   /api/works/:id/letters reader → author letter (D1 only, no Discord)
+ *   GET    /api/works/:id/letters author's inbox                 [X-Manage-Secret]
+ *   DELETE /api/works/:id/letters/:letterId                      [X-Manage-Secret]
+ *   PUT    /api/works/:id/letters-open  toggle the mailbox       [X-Manage-Secret]
  *   *      /api/admin/*           operator toolkit               [X-Admin-Secret]
- *   GET    /w/:id                 baked cover / single page from R2 (+ age gate); counts the view
+ *   GET    /w/:id                 baked cover / single page from R2 (+ age gate,
+ *                                 + password gate); counts the view (never on the gate)
  *   GET    /w/:id/:n              baked chapter page n (1-999) from R2; never counts views
+ *   POST   /w/:id/unlock          password gate unlock → cookie + 303
  *   GET    /w/:id/manage          manage page (secret lives in URL fragment)
  *   GET    /w/:id/report          live report form (+ optional Turnstile)
+ *   GET    /w/:id/letter          live letter form (404 while letters are closed)
  *   GET    /admin                 operator console (secret lives in URL fragment)
  *   GET    /                      landing
  *   GET    /rules                 ratings, warning tags, hard lines
@@ -26,6 +34,8 @@ import { deleteWork, listExpired, listRemovedBefore } from './worker/lib/db';
 import { handlePublish } from './worker/routes/publish';
 import { handleManage } from './worker/routes/manage';
 import { handleReport, reportPage } from './worker/routes/report';
+import { handleLetterSubmit, letterPage } from './worker/routes/letters';
+import { handleUnlock } from './worker/routes/unlock';
 import { handleAdmin } from './worker/routes/admin';
 import { handleRead, handleReadChapter, notFoundPage } from './worker/routes/read';
 import { landingPage } from './worker/pages/landing';
@@ -104,7 +114,21 @@ async function route(
     return await handleAdmin(request, env, path, method);
   }
 
-  const workMatch = path.match(/^\/api\/works\/([^/]{1,64})(\/(renew|report))?$/);
+  // One letter of the author's inbox: /api/works/:id/letters/:letterId.
+  const letterItemMatch = path.match(/^\/api\/works\/([^/]{1,64})\/letters\/([^/]{1,64})$/);
+  if (letterItemMatch) {
+    const [, id, letterId] = letterItemMatch;
+    if (method === 'OPTIONS') return preflightResponse(request);
+    if (!WORK_ID_RE.test(id ?? '') || !WORK_ID_RE.test(letterId ?? '')) {
+      return Response.json({ error: 'not_found' }, { status: 404 });
+    }
+    if (method === 'DELETE') {
+      return await handleManage(request, env, id ?? '', 'letter-delete', letterId ?? '');
+    }
+    return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+  }
+
+  const workMatch = path.match(/^\/api\/works\/([^/]{1,64})(\/(renew|report|password|letters|letters-open))?$/);
   if (workMatch) {
     const [, id, , action] = workMatch;
     if (method === 'OPTIONS') return preflightResponse(request);
@@ -115,20 +139,33 @@ async function route(
     const workId = id ?? '';
     if (action === 'report' && method === 'POST') return await handleReport(request, env, workId);
     if (action === 'renew' && method === 'POST') return await handleManage(request, env, workId, 'renew');
+    if (action === 'password' && method === 'PUT') return await handleManage(request, env, workId, 'password');
+    if (action === 'letters' && method === 'POST') return await handleLetterSubmit(request, env, workId);
+    if (action === 'letters' && method === 'GET') return await handleManage(request, env, workId, 'letters');
+    if (action === 'letters-open' && method === 'PUT') return await handleManage(request, env, workId, 'letters-open');
     if (!action && method === 'GET') return await handleManage(request, env, workId, 'meta');
     if (!action && method === 'PUT') return await handleManage(request, env, workId, 'update');
     if (!action && method === 'DELETE') return await handleManage(request, env, workId, 'unpublish');
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
 
-  const readMatch = path.match(/^\/w\/([^/]{1,64})(\/(manage|report))?$/);
+  const readMatch = path.match(/^\/w\/([^/]{1,64})(\/(manage|report|letter))?$/);
   if (readMatch && method === 'GET') {
     const [, id, , sub] = readMatch;
     if (!WORK_ID_RE.test(id ?? '')) return notFoundPage();
     const workId = id ?? '';
     if (sub === 'manage') return managePage(workId);
-    if (sub === 'report') return await reportPage(env, workId);
+    if (sub === 'report') return await reportPage(request, env, workId);
+    if (sub === 'letter') return await letterPage(request, env, workId);
     return await handleRead(request, env, ctx, workId);
+  }
+
+  // Password gate unlock — form POST only.
+  const unlockMatch = path.match(/^\/w\/([^/]{1,64})\/unlock$/);
+  if (unlockMatch && method === 'POST') {
+    const [, id] = unlockMatch;
+    if (!WORK_ID_RE.test(id ?? '')) return notFoundPage();
+    return await handleUnlock(request, env, id ?? '');
   }
 
   // Chapter pages: n = 1..999, no leading zeros — anything else (0, 01, non-
@@ -137,7 +174,7 @@ async function route(
   if (chapterMatch && method === 'GET') {
     const [, id, n] = chapterMatch;
     if (!WORK_ID_RE.test(id ?? '')) return notFoundPage();
-    return await handleReadChapter(env, id ?? '', Number(n));
+    return await handleReadChapter(request, env, id ?? '', Number(n));
   }
 
   if (method === 'GET' && path === '/') return landingPage();
