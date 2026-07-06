@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from './worker';
 import type { Env } from './worker/lib/env';
 import type { WorkRow } from './worker/lib/db';
+import { chainRunsKey } from './worker/lib/moderation';
 import { PUBLISH_BUNDLE_KIND, PUBLISH_BUNDLE_VERSION, type PublishBundleV1 } from './format';
 
 // ---------- minimal fakes ----------
@@ -115,6 +116,13 @@ class FakeStatement {
     if (s.includes('SELECT * FROM works WHERE id')) {
       return (this.works.get(String(this.args[0])) as T | undefined) ?? null;
     }
+    // incrementCounter — the chain budget's atomic upsert with RETURNING.
+    if (s.includes('ON CONFLICT(key) DO UPDATE SET value = CAST')) {
+      const key = String(this.args[0]);
+      const next = Number(this.db.settings.get(key) ?? '0') + 1;
+      this.db.settings.set(key, String(next));
+      return { value: String(next) } as T;
+    }
     if (s.includes('COUNT(*) AS n FROM works WHERE listed = 1')) {
       return { n: this.shelfRows().length } as T;
     }
@@ -138,7 +146,7 @@ class FakeStatement {
     const s = this.sql;
     const a = this.args;
     if (s.includes('INSERT INTO works')) {
-      const [id, secret_hash, title, pen_name, language, rating, warnings, word_count, first_line, created_at, updated_at, expires_at] = a;
+      const [id, secret_hash, title, pen_name, language, rating, warnings, word_count, first_line, content_hash, created_at, updated_at, expires_at] = a;
       this.works.set(String(id), {
         id: String(id),
         secret_hash: String(secret_hash),
@@ -149,6 +157,7 @@ class FakeStatement {
         warnings: String(warnings),
         word_count: Number(word_count),
         first_line: String(first_line),
+        content_hash: String(content_hash),
         status: 'active',
         listed: 0,
         password_hash: null,
@@ -223,14 +232,15 @@ class FakeStatement {
       return { success: true };
     }
     if (s.includes('UPDATE works SET title')) {
-      const row = this.works.get(String(a[6]));
+      const row = this.works.get(String(a[7]));
       if (row) {
         row.title = String(a[0]);
         row.rating = String(a[1]);
         row.warnings = String(a[2]);
         row.word_count = Number(a[3]);
         row.first_line = String(a[4]);
-        row.updated_at = String(a[5]);
+        row.content_hash = String(a[5]);
+        row.updated_at = String(a[6]);
       }
       return { success: true };
     }
@@ -261,6 +271,8 @@ class FakeStatement {
         row.rating = String(a[0]);
         row.warnings = String(a[1]);
         row.updated_at = String(a[2]);
+        // Relabel stales the cached verdict (see relabelWork in db.ts).
+        row.content_hash = null;
       }
       return { success: true };
     }
@@ -2333,6 +2345,9 @@ describe('PUT /api/works/:id/listing — the gate', () => {
     const { calls } = stubModerationFetch({});
     const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
     const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    // Pre-0006 row (NULL hash): the gate must run the chain fresh — the
+    // verdict-reuse path has its own coverage in the budget-guard suite.
+    h.d1.works.get(id)!.content_hash = null;
 
     const res = await putListing(h, id, manageSecret, true);
     expect(res.status).toBe(200);
@@ -2365,6 +2380,8 @@ describe('PUT /api/works/:id/listing — the gate', () => {
     });
     const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
     const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    // Pre-0006 row (NULL hash) → fresh chain run, not verdict reuse.
+    h.d1.works.get(id)!.content_hash = null;
     // The shadow run on publish already pinged Discord once — count from here.
     const discordBefore = discordCalls(calls).length;
 
@@ -2439,6 +2456,8 @@ describe('PUT /api/works/:id/listing — the gate', () => {
     });
     const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
     const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    // Pre-0006 row (NULL hash) → fresh chain run, not verdict reuse.
+    h.d1.works.get(id)!.content_hash = null;
     const discordBefore = discordCalls(calls).length;
 
     await putListing(h, id, manageSecret, true);
@@ -2462,6 +2481,9 @@ describe('PUT /api/works/:id/listing — the gate', () => {
     stubModerationFetch({});
     const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
     const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    // Stale the stored pass verdict (pre-0006 NULL hash) so the gate must
+    // run the chain — which is about to break.
+    h.d1.works.get(id)!.content_hash = null;
 
     const { calls } = stubModerationFetch({ anthropicStatus: 500 });
     await putListing(h, id, manageSecret, true);
@@ -2853,5 +2875,311 @@ describe('purge cron vs listed works', () => {
     expect(h.d1.works.has(listed.id)).toBe(true);
     expect(h.r2.store.has(`works/${listed.id}/index.html`)).toBe(true);
     expect(h.d1.works.has(unlisted.id)).toBe(false);
+  });
+});
+
+// ---------- API-spend budget guards — daily cap + content-hash dedup ----------
+
+describe('moderation budget — global daily cap', () => {
+  it('publishes beyond the cap store a skipped verdict: zero API calls, no Discord', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({
+      ANTHROPIC_API_KEY: 'sk-test',
+      DISCORD_WEBHOOK: 'https://discord.example/hook',
+      CHAIN_DAILY_CAP: '2',
+    });
+
+    const a = await publish(h, makeModeratedBundle('First manuscript, its own prose entirely. '.repeat(6)));
+    const b = await publish(h, makeModeratedBundle('Second manuscript, different words again. '.repeat(6)));
+    expect(storedVerdict(h, a.id)?.['outcome']).toBe('pass');
+    expect(storedVerdict(h, b.id)?.['outcome']).toBe('pass');
+    const callsAtCap = anthropicCalls(calls).length;
+    expect(callsAtCap).toBeGreaterThan(0);
+
+    const c = await publish(h, makeModeratedBundle('Third manuscript arrives over budget now. '.repeat(6)));
+    const verdict = storedVerdict(h, c.id);
+    expect(verdict?.['outcome']).toBe('skipped');
+    expect(verdict?.['reason']).toBe('daily budget reached');
+    expect(verdict?.['model']).toBe('');
+    expect(verdict?.['ms']).toBe(0);
+    // The N+1th run spent nothing and pinged nobody.
+    expect(anthropicCalls(calls).length).toBe(callsAtCap);
+    expect(discordCalls(calls)).toHaveLength(0);
+  });
+
+  it('the counter is day-keyed: another day\'s spend never throttles today', async () => {
+    stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', CHAIN_DAILY_CAP: '1' });
+    // A busy day in the past under a different UTC key — irrelevant today.
+    h.d1.settings.set(chainRunsKey(new Date('1999-01-01T12:00:00Z')), '9999');
+
+    const { id } = await publish(h, makeModeratedBundle());
+    expect(storedVerdict(h, id)?.['outcome']).toBe('pass');
+    expect(h.d1.settings.get(chainRunsKey())).toBe('1');
+
+    // …while today's own key at the cap throttles the next run.
+    const over = await publish(h, makeModeratedBundle('Fresh prose to dodge the dedup. '.repeat(8)));
+    expect(storedVerdict(h, over.id)?.['outcome']).toBe('skipped');
+  });
+
+  it('a failed chain run still counts against the budget', async () => {
+    stubModerationFetch({ anthropicStatus: 500 });
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { id } = await publish(h, makeModeratedBundle());
+    expect(storedVerdict(h, id)?.['outcome']).toBe('error');
+    // The attempt was consumed — error loops cannot burn free retries.
+    expect(h.d1.settings.get(chainRunsKey())).toBe('1');
+  });
+
+  it('CHAIN_DAILY_CAP unset → the default cap of 100 applies', async () => {
+    stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    h.d1.settings.set(chainRunsKey(), '99');
+    const ok = await publish(h, makeModeratedBundle());
+    expect(storedVerdict(h, ok.id)?.['outcome']).toBe('pass'); // run 100 of 100
+    const over = await publish(h, makeModeratedBundle('Different prose for run 101 today. '.repeat(8)));
+    expect(storedVerdict(h, over.id)?.['outcome']).toBe('skipped');
+  });
+
+  it('listing request over budget → held manual + Discord budget note; NEVER listed', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({
+      ANTHROPIC_API_KEY: 'sk-test',
+      DISCORD_WEBHOOK: 'https://discord.example/hook',
+      CHAIN_DAILY_CAP: '1',
+    });
+    // A small work: no shadow run (<200 chars), no stored verdict to reuse.
+    const { id, manageSecret } = await publish(h);
+    h.d1.settings.set(chainRunsKey(), '1'); // today's budget already spent
+
+    const res = await putListing(h, id, manageSecret, true);
+    expect(res.status).toBe(200); // the request itself is never blocked
+
+    const row = h.d1.works.get(id);
+    expect(row?.listing_state).toBe('held');
+    expect(row?.listed).toBe(0);
+    expect(listingVerdictOf(h, id)).toEqual({ reason: 'manual' });
+    expect(anthropicCalls(calls)).toHaveLength(0);
+
+    const discord = discordCalls(calls);
+    expect(discord).toHaveLength(1);
+    const payload = JSON.stringify(discord[0]?.body);
+    expect(payload).toContain('LISTING REQUEST');
+    expect(payload).toContain('chain budget reached');
+  });
+
+  it('budget exhaustion never blocks link-publishing: the publish response is a plain 200', async () => {
+    stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', CHAIN_DAILY_CAP: '1' });
+    h.d1.settings.set(chainRunsKey(), '1');
+    const { id, url } = await publish(h, makeModeratedBundle()); // asserts 200 inside
+    expect(url).toBe(`${BASE}/w/${id}`);
+    expect(h.r2.store.has(`works/${id}/index.html`)).toBe(true);
+  });
+});
+
+describe('content-hash dedup — never pay twice for the same prose', () => {
+  function putUpdate(h: Harness, id: string, secret: string, bundle: PublishBundleV1): Promise<Response> {
+    return dispatch(
+      h,
+      new Request(`${BASE}/api/works/${id}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-manage-secret': secret },
+        body: JSON.stringify(bundle),
+      }),
+    );
+  }
+
+  it('publish stores the content hash on the row', async () => {
+    stubModerationFetch({});
+    const h = makeEnv();
+    const { id } = await publish(h);
+    expect(h.d1.works.get(id)?.content_hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('update with identical content skips the chain: no API calls, old verdict untouched', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const bundle = makeModeratedBundle();
+    const { id, manageSecret } = await publish(h, bundle);
+    expect(storedVerdict(h, id)?.['outcome']).toBe('pass');
+    const callsAfterPublish = anthropicCalls(calls).length;
+    const verdictRaw = h.d1.works.get(id)?.moderation_verdict;
+    const verdictAt = h.d1.works.get(id)?.moderation_at;
+    const runsAfterPublish = h.d1.settings.get(chainRunsKey());
+
+    const res = await putUpdate(h, id, manageSecret, makeModeratedBundle());
+    expect(res.status).toBe(200);
+    expect(anthropicCalls(calls).length).toBe(callsAfterPublish);
+    expect(h.d1.works.get(id)?.moderation_verdict).toBe(verdictRaw);
+    expect(h.d1.works.get(id)?.moderation_at).toBe(verdictAt);
+    // No budget consumed either.
+    expect(h.d1.settings.get(chainRunsKey())).toBe(runsAfterPublish);
+  });
+
+  it('update with changed prose stores the new hash and re-runs the chain', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    const oldHash = h.d1.works.get(id)?.content_hash;
+    const callsAfterPublish = anthropicCalls(calls).length;
+
+    const res = await putUpdate(h, id, manageSecret, makeModeratedBundle('The revised draft says different things. '.repeat(6)));
+    expect(res.status).toBe(200);
+    expect(h.d1.works.get(id)?.content_hash).not.toBe(oldHash);
+    expect(anthropicCalls(calls).length).toBeGreaterThan(callsAfterPublish);
+  });
+
+  it('update with identical prose but changed labels re-runs the chain (labels are verdict inputs)', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    const callsAfterPublish = anthropicCalls(calls).length;
+
+    const relabeled = makeModeratedBundle();
+    relabeled.rating = 'mature';
+    const res = await putUpdate(h, id, manageSecret, relabeled);
+    expect(res.status).toBe(200);
+    expect(anthropicCalls(calls).length).toBeGreaterThan(callsAfterPublish);
+  });
+
+  it('pre-0006 row (NULL hash) = unknown: an identical update still runs the chain', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    h.d1.works.get(id)!.content_hash = null;
+    const callsAfterPublish = anthropicCalls(calls).length;
+
+    const res = await putUpdate(h, id, manageSecret, makeModeratedBundle());
+    expect(res.status).toBe(200);
+    expect(anthropicCalls(calls).length).toBeGreaterThan(callsAfterPublish);
+    // …and the hash backfills for next time.
+    expect(h.d1.works.get(id)?.content_hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe('listing gate — verdict reuse', () => {
+  it('fresh pass verdict + matching hash → listed with {reused:true}, zero API calls', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test', DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    expect(storedVerdict(h, id)?.['outcome']).toBe('pass');
+    const callsAfterPublish = anthropicCalls(calls).length;
+    const runsAfterPublish = h.d1.settings.get(chainRunsKey());
+    const verdictAt = h.d1.works.get(id)?.moderation_at;
+
+    await putListing(h, id, manageSecret, true);
+
+    const row = h.d1.works.get(id);
+    expect(row?.listing_state).toBe('listed');
+    expect(row?.listed).toBe(1);
+    expect(listingVerdictOf(h, id)).toEqual({ reused: true });
+    // Zero new API calls, zero budget, verdict record untouched.
+    expect(anthropicCalls(calls).length).toBe(callsAfterPublish);
+    expect(h.d1.settings.get(chainRunsKey())).toBe(runsAfterPublish);
+    expect(h.d1.works.get(id)?.moderation_at).toBe(verdictAt);
+    // The operator still sees the arrival.
+    expect(JSON.stringify(discordCalls(calls).map((c) => c.body))).toContain('Listed on the Shelf');
+  });
+
+  it('reused tag-fix verdict → refused with the suggestion and {reused:true}, zero API calls', async () => {
+    const { calls } = stubModerationFetch({
+      routerFlags: () => ['sexual-explicit'],
+      verifier: {
+        hardLine: 'none',
+        reason: 'explicit content without labels',
+        labels: 'under-labeled',
+        suggested: { rating: 'explicit', warnings: ['sexual-content'] },
+      },
+    });
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    expect(storedVerdict(h, id)?.['outcome']).toBe('tag-fix');
+    const callsAfterPublish = anthropicCalls(calls).length;
+
+    await putListing(h, id, manageSecret, true);
+
+    expect(h.d1.works.get(id)?.listing_state).toBe('refused');
+    expect(listingVerdictOf(h, id)).toEqual({
+      reason: 'labels',
+      suggested: { rating: 'explicit', warnings: ['sexual-content'] },
+      reused: true,
+    });
+    expect(anthropicCalls(calls).length).toBe(callsAfterPublish);
+  });
+
+  it('accepting the suggested labels stales the reused verdict: the retry re-judges and lists', async () => {
+    // Same-prose relabel MUST invalidate reuse, or a reused tag-fix would
+    // refuse forever (and a reused pass could carry stale labels unreviewed).
+    const { calls } = stubModerationFetch({
+      routerFlags: () => ['sexual-explicit'],
+      verifier: {
+        hardLine: 'none',
+        reason: 'explicit content without labels',
+        labels: 'under-labeled',
+        suggested: { rating: 'explicit', warnings: ['sexual-content'] },
+      },
+    });
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    await putListing(h, id, manageSecret, true); // reused tag-fix → refused
+    expect(h.d1.works.get(id)?.listing_state).toBe('refused');
+
+    await putLabels(h, id, manageSecret, 'explicit', ['sexual-content']);
+    expect(h.d1.works.get(id)?.content_hash).toBeNull(); // relabel stales the hash
+
+    const callsBeforeRetry = anthropicCalls(calls).length;
+    await putListing(h, id, manageSecret, true);
+    expect(h.d1.works.get(id)?.listing_state).toBe('listed');
+    // The retry ran the chain fresh (router-only pass — labels now cover).
+    expect(anthropicCalls(calls).length).toBeGreaterThan(callsBeforeRetry);
+  });
+
+  it('stale hash → the gate runs the chain instead of reusing', async () => {
+    const { calls } = stubModerationFetch({});
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    h.d1.works.get(id)!.content_hash = 'f'.repeat(64); // verdict is for other prose
+    const callsAfterPublish = anthropicCalls(calls).length;
+
+    await putListing(h, id, manageSecret, true);
+
+    expect(anthropicCalls(calls).length).toBeGreaterThan(callsAfterPublish);
+    expect(h.d1.works.get(id)?.listing_state).toBe('listed');
+    expect(h.d1.works.get(id)?.listing_verdict).toBeNull(); // fresh run, no reused mark
+  });
+
+  it('an error verdict is never reused — the gate runs the chain', async () => {
+    stubModerationFetch({ anthropicStatus: 500 });
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { id, manageSecret } = await publish(h, makeModeratedBundle());
+    expect(storedVerdict(h, id)?.['outcome']).toBe('error'); // hash matches, verdict broken
+
+    const { calls } = stubModerationFetch({}); // the API recovers
+    await putListing(h, id, manageSecret, true);
+
+    expect(anthropicCalls(calls).length).toBeGreaterThan(0);
+    expect(h.d1.works.get(id)?.listing_state).toBe('listed');
+  });
+});
+
+describe('admin overview — chain budget visibility', () => {
+  it('carries { chainBudget: { cap, usedToday } }', async () => {
+    stubModerationFetch({});
+    const h = makeEnv({ ADMIN_SECRET, ANTHROPIC_API_KEY: 'sk-test', CHAIN_DAILY_CAP: '7' });
+    await publish(h, makeModeratedBundle()); // one shadow run today
+
+    const o = (await (await adminGet(h, '/api/admin/overview')).json()) as Overview & {
+      chainBudget: { cap: number; usedToday: number };
+    };
+    expect(o.chainBudget).toEqual({ cap: 7, usedToday: 1 });
+  });
+
+  it('reads zero used and the default cap on a quiet day', async () => {
+    const h = makeEnv({ ADMIN_SECRET });
+    const o = (await (await adminGet(h, '/api/admin/overview')).json()) as Overview & {
+      chainBudget: { cap: number; usedToday: number };
+    };
+    expect(o.chainBudget).toEqual({ cap: 100, usedToday: 0 });
   });
 });

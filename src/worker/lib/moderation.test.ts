@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CHAIN_DAILY_CAP_DEFAULT,
+  CHAIN_DAILY_CAP_MAX,
+  CHAIN_DAILY_CAP_MIN,
   CHUNK_TARGET_CHARS,
   HEAD_CHUNKS,
   MAX_CHUNKS,
   SAMPLE_CHUNKS,
   capChunks,
+  chainDailyCap,
+  chainRunsKey,
   chunkBundle,
   parseModerationVerdict,
   uncoveredContentFlags,
@@ -155,6 +160,29 @@ describe('uncoveredContentFlags', () => {
 
   it('hard-line flags are not label questions', () => {
     expect(uncoveredContentFlags(flags('minors', 'real-person-harassment'), 'general', [])).toEqual([]);
+  });
+});
+
+describe('chain budget knobs', () => {
+  it('chainDailyCap: default 100, clamped 1..10000, garbage falls back', () => {
+    expect(chainDailyCap(undefined)).toBe(CHAIN_DAILY_CAP_DEFAULT);
+    expect(chainDailyCap('')).toBe(CHAIN_DAILY_CAP_DEFAULT);
+    expect(chainDailyCap('not-a-number')).toBe(CHAIN_DAILY_CAP_DEFAULT);
+    expect(chainDailyCap('250')).toBe(250);
+    expect(chainDailyCap('0')).toBe(CHAIN_DAILY_CAP_MIN);
+    expect(chainDailyCap('-5')).toBe(CHAIN_DAILY_CAP_MIN);
+    expect(chainDailyCap('50000')).toBe(CHAIN_DAILY_CAP_MAX);
+    expect(chainDailyCap('12.9')).toBe(12); // parseInt semantics, by design
+  });
+
+  it('chainRunsKey: UTC-date keyed — same UTC day shares a key, midnight Z rolls it', () => {
+    expect(chainRunsKey(new Date('2026-07-06T00:00:00Z'))).toBe('chain_runs_2026-07-06');
+    expect(chainRunsKey(new Date('2026-07-06T23:59:59Z'))).toBe('chain_runs_2026-07-06');
+    expect(chainRunsKey(new Date('2026-07-07T00:00:01Z'))).toBe('chain_runs_2026-07-07');
+    // A local-time-zone stamp still keys by its UTC date.
+    expect(chainRunsKey(new Date('2026-07-06T22:30:00-05:00'))).toBe('chain_runs_2026-07-07');
+    // Defaults to now — shape only, the worker tests cover the wiring.
+    expect(chainRunsKey()).toMatch(/^chain_runs_\d{4}-\d{2}-\d{2}$/);
   });
 });
 
