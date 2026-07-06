@@ -12,25 +12,31 @@
  */
 
 import type { Env } from '../lib/env';
-import { htmlResponse, pageShell } from '../../html';
+import { escapeHtml, htmlResponse, pageShell } from '../../html';
 import { chapterKey, getWork, incrementViews, pageKey, type WorkRow } from '../lib/db';
 import { isUnlocked } from '../lib/password';
 import { clientIp } from '../lib/http';
+import { langForRequest, langForWork, t, type Lang } from '../i18n';
 import { gatePage } from '../pages/gate-page';
 
-export function notFoundPage(): Response {
+export function notFoundPage(lang: Lang = 'en'): Response {
   return htmlResponse(
     pageShell({
-      title: 'Not found — The Shelf',
+      title: `${t(lang, 'notFound.tab')} — ${t(lang, 'brand')}`,
+      lang,
       body: `<div class="page">
-<h1>Nothing on this shelf</h1>
-<p class="muted">This work doesn&#39;t exist, was unpublished by its author, or its link expired.
-Unlisted links live for 30 days unless the author renews them.</p>
-<p><a class="btn" href="/">The Shelf</a></p>
+<h1>${escapeHtml(t(lang, 'notFound.heading'))}</h1>
+<p class="muted">${t(lang, 'notFound.body')}</p>
+<p><a class="btn" href="/">${escapeHtml(t(lang, 'brand'))}</a></p>
 </div>`,
     }),
     404,
   );
+}
+
+/** Chrome locale for a 404 — the request's language (no work in hand). */
+export function notFoundLang(request: Request): Lang {
+  return langForRequest(request, new URL(request.url));
 }
 
 /**
@@ -60,7 +66,10 @@ export async function passwordGate(
 ): Promise<Response | null> {
   if (row.password_hash === null) return null;
   if (await isUnlocked(request, row.id, row.password_hash)) return null;
-  return gatePage({ id: row.id, title: row.title, penName: row.pen_name }, { next: path });
+  return gatePage(
+    { id: row.id, title: row.title, penName: row.pen_name, lang: langForWork(row.language) },
+    { next: path },
+  );
 }
 
 function servePage(body: BodyInit, locked: boolean): Response {
@@ -82,12 +91,12 @@ export async function handleRead(
   id: string,
 ): Promise<Response> {
   const row = await getActiveWork(env, id);
-  if (row === null) return notFoundPage();
+  if (row === null) return notFoundPage(notFoundLang(request));
   const gate = await passwordGate(request, row, `/w/${id}`);
   if (gate !== null) return gate; // gate serves never count as opens
 
   const obj = await env.SHELF_R2.get(pageKey(id));
-  if (obj === null) return notFoundPage();
+  if (obj === null) return notFoundPage(notFoundLang(request));
 
   const ip = clientIp(request);
   ctx.waitUntil(
@@ -108,12 +117,12 @@ export async function handleReadChapter(
   n: number,
 ): Promise<Response> {
   const row = await getActiveWork(env, id);
-  if (row === null) return notFoundPage();
+  if (row === null) return notFoundPage(notFoundLang(request));
   const gate = await passwordGate(request, row, `/w/${id}/${n}`);
   if (gate !== null) return gate;
 
   const obj = await env.SHELF_R2.get(chapterKey(id, n));
-  if (obj === null) return notFoundPage();
+  if (obj === null) return notFoundPage(notFoundLang(request));
 
   return servePage(obj.body, row.password_hash !== null);
 }

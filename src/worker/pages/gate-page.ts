@@ -11,6 +11,7 @@
  */
 
 import { escapeHtml, htmlResponse, pageShell } from '../../html';
+import { t, type Lang } from '../i18n';
 
 const GATE_CSS = `
 .gate{min-height:100vh;display:grid;place-items:center;padding:1.5rem}
@@ -40,45 +41,50 @@ export interface GateWork {
   id: string;
   title: string;
   penName: string;
+  /** The work's language → gate chrome locale (a Hungarian work gates in Magyar). */
+  lang: Lang;
 }
 
 export interface GateOpts {
   /** Same-work path to return to after unlock (validated again on POST). */
   next?: string;
-  /** Quiet error line ("That's not it."). */
+  /** Quiet error line, as an i18n key ('gate.wrong' | 'gate.tooMany'). */
   error?: string;
   status?: number;
 }
 
 export function gatePage(work: GateWork, opts: GateOpts = {}): Response {
+  const lang = work.lang;
   const id = escapeHtml(work.id);
   const next =
     opts.next !== undefined && opts.next.length > 0
       ? `<input type="hidden" name="next" value="${escapeHtml(opts.next)}">`
       : '';
+  // gate.wrong is stored pre-escaped (&#39;), so it goes in raw — every other
+  // key is plain text and passes through escapeHtml at the interpolation point.
   const error =
     opts.error !== undefined && opts.error.length > 0
-      ? `<p class="gate-error">${escapeHtml(opts.error)}</p>`
+      ? `<p class="gate-error">${t(lang, opts.error)}</p>`
       : '';
 
   const body = `<div class="gate">
 <div class="gate-card">
-<p class="gate-kicker">The Shelf</p>
+<p class="gate-kicker">${escapeHtml(t(lang, 'brand'))}</p>
 ${LOCK_SVG}
 <h1 class="gate-title">${escapeHtml(work.title)}</h1>
-<p class="gate-by">by ${escapeHtml(work.penName)}</p>
+<p class="gate-by">${escapeHtml(t(lang, 'by'))} ${escapeHtml(work.penName)}</p>
 ${error}
 <form class="gate-form" method="post" action="/w/${id}/unlock">
 ${next}
-<input type="password" name="password" required maxlength="128" autocomplete="current-password" autofocus aria-label="Password">
-<button type="submit" class="btn btn-primary">Unlock</button>
+<input type="password" name="password" required maxlength="128" autocomplete="current-password" autofocus aria-label="${escapeHtml(t(lang, 'gate.placeholder'))}">
+<button type="submit" class="btn btn-primary">${escapeHtml(t(lang, 'gate.unlock'))}</button>
 </form>
-<p class="gate-hint">The author shares the password personally.</p>
+<p class="gate-hint">${escapeHtml(t(lang, 'gate.hint'))}</p>
 </div>
 </div>`;
 
   return htmlResponse(
-    pageShell({ title: `${work.title} — The Shelf`, css: GATE_CSS, body }),
+    pageShell({ title: `${work.title} — ${t(lang, 'brand')}`, lang, css: GATE_CSS, body }),
     opts.status ?? 200,
     { 'cache-control': 'no-store' },
   );

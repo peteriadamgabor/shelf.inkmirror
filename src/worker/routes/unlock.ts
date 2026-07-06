@@ -16,8 +16,9 @@
 import type { Env } from '../lib/env';
 import { unlockCookieName, unlockCookieValue, verifyPassword } from '../lib/password';
 import { clientIp, jsonError, readBodyCapped } from '../lib/http';
+import { langForWork } from '../i18n';
 import { gatePage } from '../pages/gate-page';
-import { getActiveWork, notFoundPage } from './read';
+import { getActiveWork, notFoundLang, notFoundPage } from './read';
 
 const MAX_UNLOCK_BODY_BYTES = 16 * 1024;
 const MAX_NEXT_LENGTH = 200;
@@ -41,13 +42,18 @@ function seeOther(location: string, setCookie?: string): Response {
 
 export async function handleUnlock(request: Request, env: Env, id: string): Promise<Response> {
   const row = await getActiveWork(env, id);
-  if (row === null) return notFoundPage();
+  if (row === null) return notFoundPage(notFoundLang(request));
 
-  const gateWork = { id: row.id, title: row.title, penName: row.pen_name };
+  const gateWork = {
+    id: row.id,
+    title: row.title,
+    penName: row.pen_name,
+    lang: langForWork(row.language),
+  };
 
   const rl = await env.RL_UNLOCK.limit({ key: `${clientIp(request)}:${id}` });
   if (!rl.success) {
-    return gatePage(gateWork, { error: 'Too many tries — wait a minute.', status: 429 });
+    return gatePage(gateWork, { error: 'gate.tooMany', status: 429 });
   }
 
   // No password on this work — nothing to unlock, just go read it.
@@ -60,7 +66,7 @@ export async function handleUnlock(request: Request, env: Env, id: string): Prom
   const next = params.get('next') ?? '';
 
   if (password.length === 0 || !(await verifyPassword(password, row.password_hash))) {
-    return gatePage(gateWork, { next, error: "That's not it.", status: 403 });
+    return gatePage(gateWork, { next, error: 'gate.wrong', status: 403 });
   }
 
   const value = await unlockCookieValue(row.password_hash, id);
