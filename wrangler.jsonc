@@ -53,6 +53,21 @@
 				"type": "ratelimit",
 				"namespace_id": "3004",
 				"simple": { "limit": 1, "period": 60 }
+			},
+			{
+				// Password-gate unlock attempts, keyed `${ip}:${id}` —
+				// 5 tries per minute per (ip, work).
+				"name": "RL_UNLOCK",
+				"type": "ratelimit",
+				"namespace_id": "3005",
+				"simple": { "limit": 5, "period": 60 }
+			},
+			{
+				// Reader→author letters, keyed by ip.
+				"name": "RL_LETTER",
+				"type": "ratelimit",
+				"namespace_id": "3006",
+				"simple": { "limit": 2, "period": 60 }
 			}
 		]
 	},

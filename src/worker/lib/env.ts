@@ -10,6 +10,10 @@ export interface Env {
   RL_REPORT: RateLimit;
   /** Per-(ip, work) cooldown so refresh spam doesn't inflate view counts. */
   RL_VIEWS: RateLimit;
+  /** Password-gate unlock attempts, keyed `${ip}:${id}`. */
+  RL_UNLOCK: RateLimit;
+  /** Reader→author letters, keyed by ip. */
+  RL_LETTER: RateLimit;
   /** Report + moderation-hold notifications. Wrangler Secret. */
   DISCORD_WEBHOOK?: string;
   /** Phase 2 moderation chain. Wrangler Secret. */
