@@ -96,10 +96,15 @@ reports, and the security-headers wrapper.
 | `/api/works/:id` | DELETE | Unpublish. Requires secret. |
 | `/api/works/:id/renew` | POST | Push `expires_at` +30d. Requires secret. |
 | `/api/works/:id/report` | POST | Reporter picks the rule violated + optional note → Discord webhook (reuses feedback handler pattern: honeypot, length caps). |
-| `/api/works/:id/letters` | POST | Reader → author letter (see Letters). Honeypot + caps + `RL_SHELF_LETTER`; 404s when the author disabled letters. |
-| `/api/works/:id/letters` | GET | Author reads letters. Requires `X-Manage-Secret`. |
-| `/w/:id` | GET | Reading page (baked HTML from R2, wrapped with headers + age gate). Increments `views` via `ctx.waitUntil` with a short per-IP cooldown. |
-| `/w/:id/manage` | GET | Manage page (views count, letters, renew/unpublish). Secret arrives in URL fragment, JS calls the API — the secret never hits server logs. |
+| `/api/works/:id/password` | PUT | **(shipped)** Set/clear the reading password. Body `{ password: string \| null }` (4–128 chars). Requires `X-Manage-Secret`, rides `RL_MANAGE`. |
+| `/api/works/:id/letters` | POST | **(shipped)** Reader → author letter (see Letters). Honeypot + caps + `RL_LETTER`; 404s when the author disabled letters. |
+| `/api/works/:id/letters` | GET | **(shipped)** Author reads letters: `{ lettersOpen, letters[] }` newest first. Requires `X-Manage-Secret`. |
+| `/api/works/:id/letters/:letterId` | DELETE | **(shipped)** Author deletes one letter. Requires `X-Manage-Secret`. |
+| `/api/works/:id/letters-open` | PUT | **(shipped)** Body `{ open: boolean }` — toggle the mailbox. Requires `X-Manage-Secret`. |
+| `/w/:id` | GET | Reading page (baked HTML from R2, wrapped with headers + age gate + password gate). Increments `views` via `ctx.waitUntil` with a short per-IP cooldown — only on a successful content serve, never on the gate. |
+| `/w/:id/unlock` | POST | **(shipped)** Password-gate unlock: verify → per-work cookie → 303 back to the page (`next`, same-work paths only). `RL_UNLOCK` per (ip, work). |
+| `/w/:id/letter` | GET | **(shipped)** Live letter form (same pattern as `/w/:id/report`); 404 while `letters_open = 0`. |
+| `/w/:id/manage` | GET | Manage page (views count, password, letters, renew/unpublish). Secret arrives in URL fragment, JS calls the API — the secret never hits server logs. |
 | `/` , `/rules` | GET | Landing + rules page (static). |
 | Cron trigger | daily | Purge works past `expires_at` (D1 row + R2 objects). |
 
@@ -107,9 +112,11 @@ reports, and the security-headers wrapper.
 
 - Body cap: 10 MB JSON (a 200k-word novel is ~2 MB; generous headroom).
 - Row caps: reuse `MAX_CHAPTERS` / `MAX_BLOCKS` bounds from `format.ts`.
-- Rate limits (CF rate-limit bindings, same pattern as `RL_SYNC_*`):
-  `RL_SHELF_PUBLISH` (e.g. 5/h/IP), `RL_SHELF_MANAGE`, `RL_SHELF_REPORT`,
-  `RL_SHELF_LETTER` (e.g. 5/h/IP).
+- Rate limits (CF rate-limit bindings, same pattern as `RL_SYNC_*`; CF only
+  accepts periods of 10/60 s, so hourly budgets are approximated per-minute):
+  `RL_PUBLISH` (2/min/IP), `RL_MANAGE` (30/min/IP), `RL_REPORT` (2/min/IP),
+  `RL_VIEWS` (view-count cooldown, 1/min per ip+work), `RL_UNLOCK`
+  (password-gate attempts, 5/min per ip+work), `RL_LETTER` (2/min/IP).
 - Publishes per manage-secret update: unlimited (author's own work).
 
 **Secrets:** `id` = 16 random bytes base64url (22 chars, 128 bits — the id
@@ -160,15 +167,37 @@ Phase 2 adds `moderation_verdict` / `moderation_at` columns.
 
 1. **Unlisted link** (default) — anyone with the link reads; listed nowhere,
    `noindex`. Reactive moderation (report → takedown).
-2. **Password-locked** — link + password the author shares personally (beta
-   readers, writing circles). Optional `password_hash` (argon2id or
-   scrypt via WebCrypto-available KDF; decide at implementation) gates the
-   page: POST password → HttpOnly cookie scoped to `/w/:id` → baked HTML
-   served. Attempts rate-limited per IP. Effectively private, so no
-   moderation gate. Content remains plaintext server-side so takedown and
-   re-bake keep working; a future client-side-encrypted tier could serve
-   true zero-knowledge drafts but is out of scope (breaks server
-   re-validation and report review).
+2. **Password-locked** — **(shipped)** link + password the author shares
+   personally (beta readers, writing circles). The author sets it from the
+   manage page (`PUT /api/works/:id/password`, `X-Manage-Secret`, body
+   `{ password: string | null }`, 4–128 chars); no InkMirror-side change.
+   Implementation decisions:
+   - **KDF: PBKDF2-SHA256 via WebCrypto** (100 000 iterations, 16-byte
+     random salt) — argon2id/scrypt are not WebCrypto-available in Workers.
+     Stored as `pbkdf2$100000$<salt-b64url>$<hash-b64url>` in
+     `works.password_hash`; NULL = no gate.
+   - **Gate:** while `password_hash` is set, `/w/:id`, `/w/:id/{n}`,
+     `/w/:id/report` and `/w/:id/letter` serve a gate page (title, pen name,
+     lock, password form) instead of content unless the request carries a
+     valid unlock cookie. Gate serves never count views; locked content is
+     served `cache-control: no-store` so it can't sit in a shared cache.
+     The manage page stays reachable — the manage secret is stronger
+     authority than the reading password.
+   - **Unlock cookie:** `POST /w/:id/unlock` verifies the password
+     (constant-time compare of the derived bytes; attempts rate-limited by
+     `RL_UNLOCK`, 5/min per (ip, work)), then sets
+     `shelf_u_{id} = base64url(HMAC-SHA256(key: the stored password_hash
+     string, message: id))` — HttpOnly, Secure, SameSite=Lax,
+     `Path=/w/{id}`, Max-Age 30 days — and 303s back to the page (`next`
+     form field, restricted to same-work `/w/:id...` paths). Verification
+     recomputes the HMAC and compares constant-time. Because the HMAC key IS
+     the stored hash, changing or clearing the password rotates the key and
+     invalidates every outstanding cookie automatically — no session state,
+     no extra secret.
+   Effectively private, so no moderation gate. Content remains plaintext
+   server-side so takedown and re-bake keep working; a future
+   client-side-encrypted tier could serve true zero-knowledge drafts but is
+   out of scope (breaks server re-validation and report review).
 3. **On the shelf** (Phase 3) — publicly listed; the only tier that pays the
    moderation toll. `listed = 1`, exempt from auto-expiry while listed.
 
@@ -185,28 +214,51 @@ on the public shelf and never used for ranking** — public counts turn the
 shelf into a leaderboard, which is exactly the social physics this product
 refuses. The shelf sorts by recency and filters, not popularity.
 
-### Letters (reader → author feedback)
+### Letters (reader → author feedback) — shipped
 
-Not comments. A quiet "Write to the author" form at the end of a work: the
-letter goes privately to the writer, one-way, no threads, no public trace.
-Reader may optionally leave a contact line if they want an answer.
+Not comments. A quiet "Write to the author" link in every baked footer leads
+to the live page `GET /w/:id/letter` (same pattern as the live report page —
+the form evolves without re-baking): the letter goes privately to the
+writer, one-way, no threads, no public trace. Reader may optionally leave a
+contact line if they want an answer. Migration `0003_letters.sql`:
 
 ```sql
 CREATE TABLE letters (
-  id         TEXT PRIMARY KEY,
-  work_id    TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE,
-  body       TEXT NOT NULL,              -- cap 4000 chars
-  contact    TEXT NOT NULL DEFAULT '',   -- cap 200 chars, optional
+  id         TEXT PRIMARY KEY,            -- 22-char random base64url
+  work_id    TEXT NOT NULL,               -- cascade handled in deleteWork()
+  body       TEXT NOT NULL,               -- cap 4000 chars
+  contact    TEXT NOT NULL DEFAULT '',    -- cap 200 chars, optional
   created_at TEXT NOT NULL
 );
+CREATE INDEX idx_letters_work ON letters (work_id);
 ```
 
-Abuse posture = the feedback form's: honeypot field, min-render-to-submit
-gate, length caps, `RL_SHELF_LETTER` per IP, per-work cap (e.g. 500 stored;
-oldest evicted). `letters_open = 0` hides the form and 404s the endpoint.
-Letters are readable/deletable from the manage page only. The author is a
-private recipient, not a moderator — but the letter form still notes that
-hard-line content in letters can be reported.
+Abuse posture = the feedback form's: honeypot field ("website"),
+min-render-to-submit gate (JS-stamped `ts`, ≥2 s), length caps, optional
+Turnstile (same keys + per-page CSP allowance as the report page),
+`RL_LETTER` per IP (2/min), per-work cap 500 stored with the oldest evicted.
+`letters_open = 0` 404s both the page and the endpoint — the exact 404 an
+unknown work produces, no "letters are closed" oracle. On a locked work the
+letter page sits behind the password gate too.
+
+**Privacy stance (by decision):**
+
+- NOTHING about the sender is stored beyond what they typed — no IP, no
+  hash, no fingerprint (same stance as reports).
+- **No Discord forward.** Letters are the author's private mail, not the
+  operator's; Discord is never the doorbell here.
+- **No admin access.** Letters are private correspondence — the admin
+  surface cannot read them; letters appear nowhere in `/api/admin/*`. When
+  an operator removal of a work is purged past its grace window (or the
+  author unpublishes, or expiry purges), `deleteWork()` deletes the work's
+  letters with it — same hygiene as reports.
+
+Letters are readable/deletable from the manage page only
+(`GET /api/works/:id/letters` → `{ lettersOpen, letters[] }` newest first,
+`DELETE /api/works/:id/letters/:letterId`, `PUT /api/works/:id/letters-open`
+`{ open }` — all `X-Manage-Secret`). The author is a private recipient, not
+a moderator — but the letter form still notes that hard-line content in
+letters can be reported.
 
 ## Reading page
 
