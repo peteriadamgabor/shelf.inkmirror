@@ -1190,6 +1190,19 @@ describe('pages', () => {
     expect(rulesHtml).toContain('id="hu"');
     expect(rules.headers.get('content-security-policy')).toContain("default-src 'none'");
   });
+
+  it('terms and privacy render bilingually, noindex, with the CSP', async () => {
+    const h = makeEnv();
+    for (const path of ['/terms', '/privacy']) {
+      const res = await dispatch(h, new Request(`${BASE}${path}`));
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain('id="en"');
+      expect(html).toContain('id="hu"'); // both languages on one page
+      expect(res.headers.get('x-robots-tag')).toContain('noindex');
+      expect(res.headers.get('content-security-policy')).toContain("default-src 'none'");
+    }
+  });
 });
 
 describe('scheduled purge', () => {

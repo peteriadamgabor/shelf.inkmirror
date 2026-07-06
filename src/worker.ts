@@ -48,6 +48,8 @@ import { langForRequest } from './worker/i18n';
 import { landingPage } from './worker/pages/landing';
 import { shelfPage } from './worker/pages/shelf-page';
 import { rulesPage } from './worker/pages/rules';
+import { termsPage } from './worker/pages/terms';
+import { privacyPage } from './worker/pages/privacy';
 import { managePage } from './worker/pages/manage-page';
 import { adminPage } from './worker/pages/admin-page';
 
@@ -213,6 +215,8 @@ async function route(
   if (method === 'GET' && path === '/') return landingPage(langForRequest(request, url));
   if (method === 'GET' && path === '/shelf') return await shelfPage(url, env, langForRequest(request, url));
   if (method === 'GET' && path === '/rules') return rulesPage();
+  if (method === 'GET' && path === '/terms') return termsPage();
+  if (method === 'GET' && path === '/privacy') return privacyPage();
   if (method === 'GET' && path === '/admin') return adminPage();
 
   return notFoundPage(langForRequest(request, url));

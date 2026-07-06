@@ -159,7 +159,7 @@ ${EN}
 <hr class="hairline">
 ${HU}
 <hr class="hairline">
-<p class="muted small"><a href="/">The Shelf</a> · <a href="https://inkmirror.cc" rel="noopener">InkMirror</a></p>
+<p class="muted small"><a href="/">The Shelf</a> · <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> · <a href="https://inkmirror.cc" rel="noopener">InkMirror</a></p>
 </div>`,
     }),
   );
