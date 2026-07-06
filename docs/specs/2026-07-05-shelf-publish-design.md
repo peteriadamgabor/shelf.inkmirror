@@ -97,6 +97,8 @@ reports, and the security-headers wrapper.
 | `/api/works/:id/renew` | POST | Push `expires_at` +30d. Requires secret. |
 | `/api/works/:id/report` | POST | Reporter picks the rule violated + optional note → Discord webhook (reuses feedback handler pattern: honeypot, length caps). |
 | `/api/works/:id/password` | PUT | **(shipped)** Set/clear the reading password. Body `{ password: string \| null }` (4–128 chars). Requires `X-Manage-Secret`, rides `RL_MANAGE`. |
+| `/api/works/:id/listing` | PUT | **(shipped, Phase 3)** Body `{ list: boolean }` — request (→ the gate) or withdraw a shelf listing. Requires `X-Manage-Secret`. See "Phase 3". |
+| `/api/works/:id/labels` | PUT | **(shipped, Phase 3)** Body `{ rating, warnings }` — author-authorized relabel + re-bake (accept-suggested-labels flow). Requires `X-Manage-Secret`. |
 | `/api/works/:id/letters` | POST | **(shipped)** Reader → author letter (see Letters). Honeypot + caps + `RL_LETTER`; 404s when the author disabled letters. |
 | `/api/works/:id/letters` | GET | **(shipped)** Author reads letters: `{ lettersOpen, letters[] }` newest first. Requires `X-Manage-Secret`. |
 | `/api/works/:id/letters/:letterId` | DELETE | **(shipped)** Author deletes one letter. Requires `X-Manage-Secret`. |
@@ -106,6 +108,7 @@ reports, and the security-headers wrapper.
 | `/w/:id/letter` | GET | **(shipped)** Live letter form (same pattern as `/w/:id/report`); 404 while `letters_open = 0`. |
 | `/w/:id/manage` | GET | Manage page (views count, password, letters, renew/unpublish). Secret arrives in URL fragment, JS calls the API — the secret never hits server logs. |
 | `/` , `/rules` | GET | Landing + rules page (static). |
+| `/shelf` | GET | **(shipped, Phase 3)** Public browse page — live-rendered, filterable, paginated, the ONE indexable route. |
 | Cron trigger | daily | Purge works past `expires_at` (D1 row + R2 objects). |
 
 **Limits (Phase 1, all enforced server-side):**
@@ -365,8 +368,10 @@ previews are courtesy only — the Worker's verdict is the real one). Shipped
 in **shadow mode**: the chain runs in the background (`ctx.waitUntil`) AFTER
 a successful publish or update — content is already stored and baked, the
 HTTP response already decided — and it never blocks anything. Unset
-`ANTHROPIC_API_KEY` = complete no-op. **Flipping shadow → gate is Phase 3's
-job** (the shelf listing is the moderation gate, per D6).
+`ANTHROPIC_API_KEY` = complete no-op. **Phase 3 flipped shadow → gate for
+listings only** (the shelf listing is the moderation gate, per D6): the same
+chain (`runChainVerdict`) now decides listing requests, while publish/update
+runs stay shadow.
 
 1. **Chunking** — block contents concatenated in reading order (chapter
    order, block order — same ordering as the tombstone content hash) into
@@ -410,9 +415,11 @@ job** (the shelf listing is the moderation gate, per D6).
    `max_tokens` on router calls; one run per publish/update, no retries.
    The publish rate limit remains the outer API-budget guard.
 
-Still Phase 3 (with the gate): the author-facing block-anchored `tag-fix`
-report with one-click accept & republish — in shadow mode the suggestion is
-operator-visible only.
+Phase 3 shipped the author-facing `tag-fix` outcome for listings: the
+suggestion lands in `listing_verdict` and the manage page offers one-click
+"accept suggested labels & retry" (see the Phase 3 section). Block-anchored
+excerpts in that report remain future polish; shadow-run suggestions on
+plain publishes stay operator-visible only.
 
 Cost: Haiku-class routing + one Sonnet verification on the rare flagged work
 ≈ low single-digit cents per novel. The publish rate limit is also the
@@ -446,6 +453,7 @@ the enforcement primitives the rules page promises.
 | `/api/admin/works/:id/remove` | POST | `status='removed'`, `removed_at=now`; body `{ tombstone?, note? }` optionally tombstones the content |
 | `/api/admin/works/:id/restore` | POST | back to `active` (only from `removed`) |
 | `/api/admin/works/:id/relabel` | POST | `{ rating, warnings }` from the fixed vocabularies → D1 update + R2 bundle mutate + re-bake; the author's next manage GET shows the corrected labels |
+| `/api/admin/works/:id/listing` | POST | **(Phase 3)** `{ action: 'approve' \| 'deny' }` a held/pending listing request |
 | `/api/admin/works/:id/expiry` | POST | `{ days: 1..365 }` → `expires_at = now + days` |
 | `/api/admin/pause` | POST | `{ paused }` → `settings.publishing_paused` |
 | `/api/admin/tombstones/:hash` | DELETE | forgive a tombstone |
@@ -517,27 +525,112 @@ New optional secrets: `ADMIN_SECRET`, `TURNSTILE_SITE_KEY`,
 `TURNSTILE_SECRET_KEY`. Migration `0002_admin.sql` adds `works.removed_at`,
 `reports`, `tombstones`, `settings`.
 
-## Phase 3 — the shelf (sketch, own spec later)
+## Phase 3 — the shelf (SHIPPED)
 
-- `GET /shelf` — browse page: generated-typography covers, title, pen-name,
-  first line, rating badge, tags; filter by rating/tag/language. Cards link
-  to the same `/w/:id` pages.
-- "List on the shelf" = separate checkbox in the publish modal → moderation
-  chain becomes a hard gate → `listed = 1`.
-- Listed works exempt from auto-expiry while listed; delisting is one click
-  on the manage page.
-- `/shelf` is indexable; `/w/*` stays `noindex`.
+The public browse page and the listing gate. The Phase 2 chain is now a
+**hard gate for listings** (design D6: the shelf listing is the moderation
+gate) while remaining shadow-only for plain publishes and updates —
+link-shares still skip moderation entirely.
+
+### Listing lifecycle
+
+Migration `0005_shelf.sql`: `works.listing_state`, `works.listed_at`,
+`works.listing_verdict`, index `idx_works_shelf (listed, status, listed_at)`.
+Invariant: `listed = 1` iff `listing_state = 'listed'`.
+
+```
+                 PUT listing {list:true}
+  NULL ────────────────────────────────► pending ──┬─ chain pass ──► listed
+  (never                                 (gate     ├─ chain tag-fix ► refused {reason:'labels', suggested}
+  requested)                             running)  ├─ chain hold ───► held    {reason:'review'}  + Discord
+    ▲                                              ├─ chain error ──► held    {reason:'error'}   + Discord
+    │                                              └─ no API key ───► held    {reason:'manual'}  + Discord
+    │
+    └── PUT listing {list:false} — ALWAYS allowed, from any state
+        (delist / withdraw); operator removal also delists.
+
+  held ── admin approve ──► listed          refused ── author retries ──► pending
+       └─ admin deny ─────► refused {reason:'operator'}
+```
+
+- **`PUT /api/works/:id/listing`** `{ list: boolean }` (manage secret).
+  `list:false` delists immediately, always. `list:true` requires an active,
+  non-password-locked work (409 `password_locked` — a public listing nobody
+  can open is a support burden); sets `pending` and schedules the gate via
+  `ctx.waitUntil`. Re-requests while listed/pending/held are idempotent
+  no-ops (no gate re-run, no Discord spam).
+- **The gate** (`src/worker/lib/listing.ts`) re-runs the Phase 2 chain
+  against the **stored** bundle and maps the verdict: `pass` → listed +
+  informational Discord embed ("Listed on the Shelf" — early-days
+  visibility); `tag-fix` → refused with the author-facing
+  `listing_verdict = { reason: 'labels', suggested }`, **no Discord** (the
+  fix is the author's); `hold` → held (`reason: 'review'`) + "LISTING HELD —
+  needs your decision" embed; `error` → held (`reason: 'error'`) + embed —
+  **fail safe: a broken chain never grants a listing, a human decides.**
+  Every gate write is guarded on `listing_state = 'pending'`, so an author
+  who delists or unpublishes mid-run beats a slow chain (and the Discord
+  ping is skipped with the write).
+- **No-key fallback (documented behavior):** without `ANTHROPIC_API_KEY`
+  every `list:true` lands as held with `{ reason: 'manual' }` plus a
+  "LISTING REQUEST — manual review" embed; the operator approves/denies from
+  the admin console. The shelf works chain-less, just slower.
+- **Author label-accept flow:** `GET /api/works/:id` (meta) now carries
+  `listingState` + parsed `listingVerdict` + `listedAt`. On a
+  `reason:'labels'` refusal the manage page shows the suggested labels with
+  one button: **`PUT /api/works/:id/labels`** `{ rating, warnings }`
+  (author-authorized twin of the admin relabel — same fixed-vocabulary
+  validation, same bundle-mutate + full re-bake via the shared
+  `src/worker/lib/relabel.ts`), then re-requests the listing. The second
+  chain run sees honest labels and passes without a verifier call.
+- **Admin:** `POST /api/admin/works/:id/listing` `{ action: 'approve' |
+  'deny' }` on held/pending requests — approve mirrors a chain pass, deny
+  lands as refused `{ reason: 'operator' }`. The overview surfaces held
+  requests as a **"Needs decision"** queue at the top of `/admin` with
+  Approve/Deny buttons, and every work row shows its `listing_state`.
+  Operator removal (`/remove`) also delists.
+- **Expiry:** listed works are exempt from the purge while listed (the
+  Phase 1 `listed = 0` purge filter, now actually reachable); delisting
+  re-arms the ordinary `expires_at` clock.
+
+### GET /shelf — the browse page
+
+Worker-rendered **live** (not baked — the listing set changes on every gate
+decision), `cache-control: public, max-age=60`. Query: `listed = 1 AND
+status = 'active' ORDER BY listed_at DESC`, filters `?rating=` /` ?lang=`,
+`?page=` at 24 per page with plain Older/Newer links — **zero JS**.
+
+- Speaks the landing's design language: hearts, serif "The Shelf." wordmark
+  (slim top bar linking to `/`), warm-cream tokens, filter chips as plain
+  links with the active one filled.
+- Cards: generated **typographic cover** (aspect 2/2.9, gradient picked
+  deterministically from the work id out of four palettes — violet
+  `#6f67d0→#4d468f`, ember `#d0602f→#98371a`, teal `#148578→#0b5c53`, deep
+  violet `#8a84dd→#5c54b8` — serif title + uppercase pen name inside), then
+  serif title, italic two-line-clamped `first_line`, rating badge +
+  "+N warnings" (count only, never the list), tabular word count, language
+  tag when ≠ `en`. Cards link to `/w/:id`. Explicit-rated cards get the
+  synopsis-free treatment: no prose teaser, the badge speaks; the work page
+  still gates.
+- **No metrics, reaffirmed:** no view counts, no rankings, no "trending" —
+  anywhere on the shelf, ever. Recency and filters only; the shelf is a
+  library table, not a leaderboard.
+- **Indexability:** `/shelf` is the ONE indexable route — it skips both the
+  `x-robots-tag` header (opt-out in `withBaseHeaders`, same passthrough
+  pattern as the Turnstile CSP) and the robots meta, and carries a proper
+  meta description. `/w/*` stays `noindex, nofollow` regardless of rating.
+- Landing gains the quiet "Browse the Shelf" link; landing + `/rules`
+  (en+hu) explain that listing is the moment of moderation.
 
 ## Reuse map
 
-| Built in Phase 1 | Phase 3 reuse |
+| Built in Phase 1 | Phase 3 reuse (as shipped) |
 |---|---|
-| Worker skeleton, limits, secrets | unchanged |
-| R2 layout + D1 schema | + `listed` flag + one query |
+| Worker skeleton, limits, secrets | unchanged (listing rides `RL_MANAGE`) |
+| R2 layout + D1 schema | + `listing_state`/`listed_at`/`listing_verdict` + shelf index + one query |
 | Baked reading pages | linked as-is from shelf cards |
-| Manage lifecycle, expiry, report, kill switch | unchanged |
-| Publish modal + rating/tags metadata | + one checkbox |
-| Moderation chain (shadow) | flipped to gate |
+| Manage lifecycle, expiry, report, kill switch | + listing section on the manage page; listed works exempt from expiry |
+| Publish modal + rating/tags metadata | listing is requested post-publish from the manage surface (checkbox in the publish modal = InkMirror-side follow-up) |
+| Moderation chain (shadow) | reused verbatim as the listing gate (`runChainVerdict`); still shadow for publish/update |
 
 ## Phasing
 
@@ -551,7 +644,8 @@ New optional secrets: `ADMIN_SECRET`, `TURNSTILE_SITE_KEY`,
    removal grace window, tombstones, panic switch, reports in D1, live
    report page with optional Turnstile. See the Phase 1.5 section above.
 3. **Phase 2 (~1–2 days):** moderation chain in shadow mode.
-4. **Phase 3 (~1–2 days):** browse page + gate flip.
+4. **Phase 3 — SHIPPED:** browse page + listing lifecycle + gate flip (for
+   listings; publish/update stays shadow). See the Phase 3 section above.
 
 ## Open questions
 
