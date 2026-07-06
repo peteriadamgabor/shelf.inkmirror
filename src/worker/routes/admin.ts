@@ -14,9 +14,9 @@
  */
 
 import { RATINGS, WARNING_TAGS, isPublishBundle, type PublishBundleV1, type WarningTag } from '../../format';
-import { renderWorkPage } from '../../render';
 import type { Env } from '../lib/env';
 import { adminAuthorized } from '../lib/admin';
+import { bakeWork } from '../lib/bake';
 import { contentHash } from '../lib/content-hash';
 import {
   bundleKey,
@@ -28,7 +28,6 @@ import {
   listRecentWorks,
   listReportsForWork,
   listTombstones,
-  pageKey,
   relabelWork,
   removeWork,
   renewWork,
@@ -196,14 +195,7 @@ async function relabel(request: Request, env: Env, row: WorkRow): Promise<Respon
 
   bundle.rating = rating as PublishBundleV1['rating'];
   bundle.warnings = warnings;
-  const html = renderWorkPage(bundle, { id: row.id });
-
-  await env.SHELF_R2.put(bundleKey(row.id), JSON.stringify(bundle), {
-    httpMetadata: { contentType: 'application/json' },
-  });
-  await env.SHELF_R2.put(pageKey(row.id), html, {
-    httpMetadata: { contentType: 'text/html; charset=utf-8' },
-  });
+  await bakeWork(bundle, row.id, env);
 
   const updatedAt = new Date().toISOString();
   await relabelWork(env.SHELF_DB, row.id, rating, warnings, updatedAt);

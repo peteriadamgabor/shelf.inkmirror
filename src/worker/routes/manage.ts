@@ -8,10 +8,11 @@
  */
 
 import { isPublishBundle, validatePublishBundle } from '../../format';
-import { countWords, firstLine, renderWorkPage } from '../../render';
+import { countWords, firstLine } from '../../render';
 import type { Env } from '../lib/env';
 import { constantTimeEqualHex, sha256Hex } from '../lib/crypto';
-import { bundleKey, deleteWork, getWork, pageKey, renewWork, updateWork, type WorkRow } from '../lib/db';
+import { bakeWork, deleteWorkObjects } from '../lib/bake';
+import { deleteWork, getWork, renewWork, updateWork, type WorkRow } from '../lib/db';
 import { MAX_PUBLISH_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
 import { WORK_TTL_MS, publishGates, workUrl } from './publish';
 
@@ -103,13 +104,7 @@ async function update(request: Request, env: Env, row: WorkRow): Promise<Respons
   const gate = await publishGates(env, parsed);
   if (gate !== null) return gate;
 
-  const html = renderWorkPage(parsed, { id: row.id });
-  await env.SHELF_R2.put(bundleKey(row.id), JSON.stringify(parsed), {
-    httpMetadata: { contentType: 'application/json' },
-  });
-  await env.SHELF_R2.put(pageKey(row.id), html, {
-    httpMetadata: { contentType: 'text/html; charset=utf-8' },
-  });
+  await bakeWork(parsed, row.id, env);
 
   const updatedAt = new Date().toISOString();
   await updateWork(env.SHELF_DB, row.id, {
@@ -125,7 +120,8 @@ async function update(request: Request, env: Env, row: WorkRow): Promise<Respons
 }
 
 async function unpublish(env: Env, id: string): Promise<Response> {
-  await env.SHELF_R2.delete([bundleKey(id), pageKey(id)]);
+  // The whole works/{id}/ prefix — chapter pages included, however many.
+  await deleteWorkObjects(env.SHELF_R2, id);
   await deleteWork(env.SHELF_DB, id);
   return Response.json({ ok: true });
 }

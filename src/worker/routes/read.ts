@@ -1,14 +1,17 @@
 /**
- * GET /w/:id — serve the baked reading page from R2.
+ * GET /w/:id — serve the baked cover/single page from R2.
+ * GET /w/:id/:n — serve baked chapter page n (multi-chapter works).
  *
- * D1 is the gatekeeper (status + expiry); R2 only stores the bytes. View
- * counting rides on ctx.waitUntil behind a per-(ip, work) cooldown so
- * serving is never blocked and refresh spam doesn't inflate "opens".
+ * D1 is the gatekeeper (status + expiry, one shared guard for both routes);
+ * R2 only stores the bytes. View counting rides on ctx.waitUntil behind a
+ * per-(ip, work) cooldown so serving is never blocked and refresh spam
+ * doesn't inflate "opens" — and it happens ONLY on the cover route: paging
+ * through a book is one open, not twelve.
  */
 
 import type { Env } from '../lib/env';
 import { htmlResponse, pageShell } from '../../html';
-import { getWork, incrementViews, pageKey } from '../lib/db';
+import { chapterKey, getWork, incrementViews, pageKey, type WorkRow } from '../lib/db';
 import { clientIp } from '../lib/http';
 
 export function notFoundPage(): Response {
@@ -26,16 +29,35 @@ Unlisted links live for 30 days unless the author renews them.</p>
   );
 }
 
+/**
+ * The one reader-facing gate: the row must exist, be active, and be inside
+ * its expiry window. Cover, chapter, and report pages all pass through here.
+ */
+export async function getActiveWork(env: Env, id: string): Promise<WorkRow | null> {
+  const row = await getWork(env.SHELF_DB, id);
+  if (row === null || row.status !== 'active') return null;
+  const expiresMs = Date.parse(row.expires_at);
+  if (Number.isFinite(expiresMs) && expiresMs < Date.now()) return null;
+  return row;
+}
+
+function servePage(body: BodyInit): Response {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'public, max-age=300',
+    },
+  });
+}
+
 export async function handleRead(
   request: Request,
   env: Env,
   ctx: ExecutionContext,
   id: string,
 ): Promise<Response> {
-  const row = await getWork(env.SHELF_DB, id);
-  if (row === null || row.status !== 'active') return notFoundPage();
-  const expiresMs = Date.parse(row.expires_at);
-  if (Number.isFinite(expiresMs) && expiresMs < Date.now()) return notFoundPage();
+  if ((await getActiveWork(env, id)) === null) return notFoundPage();
 
   const obj = await env.SHELF_R2.get(pageKey(id));
   if (obj === null) return notFoundPage();
@@ -48,11 +70,15 @@ export async function handleRead(
     })(),
   );
 
-  return new Response(obj.body, {
-    status: 200,
-    headers: {
-      'content-type': 'text/html; charset=utf-8',
-      'cache-control': 'public, max-age=300',
-    },
-  });
+  return servePage(obj.body);
+}
+
+/** Chapter pages never count views — navigation within a book is one open. */
+export async function handleReadChapter(env: Env, id: string, n: number): Promise<Response> {
+  if ((await getActiveWork(env, id)) === null) return notFoundPage();
+
+  const obj = await env.SHELF_R2.get(chapterKey(id, n));
+  if (obj === null) return notFoundPage();
+
+  return servePage(obj.body);
 }

@@ -17,10 +17,10 @@
 import type { Env } from '../lib/env';
 import { escapeHtml, htmlResponse, pageShell } from '../../html';
 import { randomBase64Url } from '../lib/crypto';
-import { getWork, incrementReportCount, insertReport } from '../lib/db';
+import { incrementReportCount, insertReport } from '../lib/db';
 import { MAX_REPORT_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
 import { workUrl } from './publish';
-import { notFoundPage } from './read';
+import { getActiveWork, notFoundPage } from './read';
 
 export const REPORT_REASONS = new Set(['mislabeled', 'hard-line', 'plagiarism', 'other']);
 const MAX_MESSAGE = 1000;
@@ -237,10 +237,8 @@ const TURNSTILE_CSP =
  * POST their inline form directly to the API — that keeps working.
  */
 export async function reportPage(env: Env, id: string): Promise<Response> {
-  const row = await getWork(env.SHELF_DB, id);
-  if (row === null || row.status !== 'active') return notFoundPage();
-  const expiresMs = Date.parse(row.expires_at);
-  if (Number.isFinite(expiresMs) && expiresMs < Date.now()) return notFoundPage();
+  const row = await getActiveWork(env, id);
+  if (row === null) return notFoundPage();
   return buildReportPage(env, id, row.title, row.pen_name);
 }
 

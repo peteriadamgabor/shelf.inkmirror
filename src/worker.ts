@@ -9,7 +9,8 @@
  *   POST   /api/works/:id/renew   push expiry +30d               [X-Manage-Secret]
  *   POST   /api/works/:id/report  rule-violation report → D1 + Discord webhook
  *   *      /api/admin/*           operator toolkit               [X-Admin-Secret]
- *   GET    /w/:id                 baked reading page from R2 (+ age gate)
+ *   GET    /w/:id                 baked cover / single page from R2 (+ age gate); counts the view
+ *   GET    /w/:id/:n              baked chapter page n (1-999) from R2; never counts views
  *   GET    /w/:id/manage          manage page (secret lives in URL fragment)
  *   GET    /w/:id/report          live report form (+ optional Turnstile)
  *   GET    /admin                 operator console (secret lives in URL fragment)
@@ -20,12 +21,13 @@
 
 import type { Env } from './worker/lib/env';
 import { WORK_ID_RE, preflightResponse, withCors } from './worker/lib/http';
-import { bundleKey, deleteWork, listExpired, listRemovedBefore, pageKey } from './worker/lib/db';
+import { deleteWorkObjects } from './worker/lib/bake';
+import { deleteWork, listExpired, listRemovedBefore } from './worker/lib/db';
 import { handlePublish } from './worker/routes/publish';
 import { handleManage } from './worker/routes/manage';
 import { handleReport, reportPage } from './worker/routes/report';
 import { handleAdmin } from './worker/routes/admin';
-import { handleRead, notFoundPage } from './worker/routes/read';
+import { handleRead, handleReadChapter, notFoundPage } from './worker/routes/read';
 import { landingPage } from './worker/pages/landing';
 import { rulesPage } from './worker/pages/rules';
 import { managePage } from './worker/pages/manage-page';
@@ -129,6 +131,15 @@ async function route(
     return await handleRead(request, env, ctx, workId);
   }
 
+  // Chapter pages: n = 1..999, no leading zeros — anything else (0, 01, non-
+  // numeric) falls through to the styled 404 at the bottom.
+  const chapterMatch = path.match(/^\/w\/([^/]{1,64})\/([1-9]\d{0,2})$/);
+  if (chapterMatch && method === 'GET') {
+    const [, id, n] = chapterMatch;
+    if (!WORK_ID_RE.test(id ?? '')) return notFoundPage();
+    return await handleReadChapter(env, id ?? '', Number(n));
+  }
+
   if (method === 'GET' && path === '/') return landingPage();
   if (method === 'GET' && path === '/rules') return rulesPage();
   if (method === 'GET' && path === '/admin') return adminPage();
@@ -150,7 +161,7 @@ async function purgeExpired(env: Env): Promise<void> {
   for (;;) {
     const ids = await listExpired(env.SHELF_DB, nowIso, PURGE_BATCH);
     for (const id of ids) {
-      await env.SHELF_R2.delete([bundleKey(id), pageKey(id)]);
+      await deleteWorkObjects(env.SHELF_R2, id);
       await deleteWork(env.SHELF_DB, id);
     }
     if (ids.length < PURGE_BATCH) break;
@@ -158,7 +169,7 @@ async function purgeExpired(env: Env): Promise<void> {
   for (;;) {
     const ids = await listRemovedBefore(env.SHELF_DB, graceCutoffIso, PURGE_BATCH);
     for (const id of ids) {
-      await env.SHELF_R2.delete([bundleKey(id), pageKey(id)]);
+      await deleteWorkObjects(env.SHELF_R2, id);
       await deleteWork(env.SHELF_DB, id);
     }
     if (ids.length < PURGE_BATCH) break;

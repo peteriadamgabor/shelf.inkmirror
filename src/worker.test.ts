@@ -20,6 +20,20 @@ class FakeR2 {
   async delete(keys: string | string[]): Promise<void> {
     for (const k of Array.isArray(keys) ? keys : [keys]) this.store.delete(k);
   }
+  async list(opts?: { prefix?: string; cursor?: string }): Promise<{
+    objects: { key: string }[];
+    truncated: false;
+    delimitedPrefixes: string[];
+  }> {
+    const prefix = opts?.prefix ?? '';
+    const objects = [...this.store.keys()]
+      .filter((k) => k.startsWith(prefix))
+      .map((key) => ({ key }));
+    return { objects, truncated: false, delimitedPrefixes: [] };
+  }
+  keysWithPrefix(prefix: string): string[] {
+    return [...this.store.keys()].filter((k) => k.startsWith(prefix));
+  }
 }
 
 interface FakeReport {
@@ -345,6 +359,23 @@ function makeBundle(overrides: Partial<PublishBundleV1> = {}): PublishBundleV1 {
   };
 }
 
+/** Three standard chapters — bakes as cover + 3 chapter pages. */
+function makeBundle3(overrides: Partial<PublishBundleV1> = {}): PublishBundleV1 {
+  return makeBundle({
+    chapters: [
+      { id: 'c1', title: 'One', order: 0, kind: 'standard' },
+      { id: 'c2', title: 'Two', order: 1, kind: 'standard' },
+      { id: 'c3', title: 'Three', order: 2, kind: 'standard' },
+    ],
+    blocks: [
+      { id: 'b1', chapter_id: 'c1', type: 'text', content: 'First chapter prose.', order: 0, metadata: { type: 'text' } },
+      { id: 'b2', chapter_id: 'c2', type: 'text', content: 'Second chapter prose.', order: 1, metadata: { type: 'text' } },
+      { id: 'b3', chapter_id: 'c3', type: 'text', content: 'Third chapter prose.', order: 2, metadata: { type: 'text' } },
+    ],
+    ...overrides,
+  });
+}
+
 const BASE = 'https://shelf.inkmirror.cc';
 
 async function dispatch(h: Harness, req: Request): Promise<Response> {
@@ -668,6 +699,141 @@ describe('GET /w/:id', () => {
     const h = makeEnv();
     const res = await dispatch(h, new Request(`${BASE}/w/AAAAAAAAAAAAAAAAAAAAAA`));
     expect(res.status).toBe(404);
+  });
+});
+
+describe('chaptered reading — bake + /w/:id/:n', () => {
+  it('single-chapter publish bakes exactly index.html, no ch/ objects, no TOC', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h);
+    expect(h.r2.store.has(`works/${id}/index.html`)).toBe(true);
+    expect(h.r2.keysWithPrefix(`works/${id}/ch/`)).toHaveLength(0);
+    expect(h.r2.store.get(`works/${id}/index.html`)).not.toContain('class="toc"');
+  });
+
+  it('3-chapter publish bakes cover + 3 chapter pages; cover has the TOC', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h, makeBundle3());
+    expect(h.r2.store.has(`works/${id}/index.html`)).toBe(true);
+    expect(h.r2.keysWithPrefix(`works/${id}/ch/`).sort()).toEqual([
+      `works/${id}/ch/1.html`,
+      `works/${id}/ch/2.html`,
+      `works/${id}/ch/3.html`,
+    ]);
+    const cover = h.r2.store.get(`works/${id}/index.html`) ?? '';
+    expect(cover).toContain('class="toc"');
+    expect(cover).not.toContain('Second chapter prose.');
+    expect(h.r2.store.get(`works/${id}/ch/2.html`)).toContain('Second chapter prose.');
+  });
+
+  it('serves /w/:id/:n with cover headers but does NOT count a view; the cover does', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h, makeBundle3());
+
+    const ch2 = await dispatch(h, new Request(`${BASE}/w/${id}/2`));
+    expect(ch2.status).toBe(200);
+    expect(ch2.headers.get('content-type')).toContain('text/html');
+    expect(ch2.headers.get('cache-control')).toBe('public, max-age=300');
+    expect(ch2.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+    expect(await ch2.text()).toContain('Second chapter prose.');
+    expect(h.d1.works.get(id)?.views).toBe(0);
+    expect(h.rlViews.keys).toHaveLength(0);
+
+    const cover = await dispatch(h, new Request(`${BASE}/w/${id}`));
+    expect(cover.status).toBe(200);
+    expect(h.d1.works.get(id)?.views).toBe(1);
+  });
+
+  it('rejects 0, leading zeros, non-numeric, and out-of-range n with a styled 404', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h, makeBundle3());
+    for (const bad of ['0', '01', '007', 'one', '1x', '1000', '4']) {
+      const res = await dispatch(h, new Request(`${BASE}/w/${id}/${bad}`));
+      expect(res.status, `/w/:id/${bad}`).toBe(404);
+      expect(await res.text(), `/w/:id/${bad}`).toContain('Nothing on this shelf');
+    }
+  });
+
+  it('chapter route gates on status and expiry exactly like the cover', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h, makeBundle3());
+    h.d1.works.get(id)!.status = 'removed';
+    expect((await dispatch(h, new Request(`${BASE}/w/${id}/1`))).status).toBe(404);
+    h.d1.works.get(id)!.status = 'active';
+    h.d1.works.get(id)!.expires_at = new Date(Date.now() - 1000).toISOString();
+    expect((await dispatch(h, new Request(`${BASE}/w/${id}/1`))).status).toBe(404);
+  });
+
+  it('PUT shrinking 3 → 2 chapters deletes the stale ch/3 page', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h, makeBundle3());
+    expect(h.r2.store.has(`works/${id}/ch/3.html`)).toBe(true);
+
+    const two = makeBundle3();
+    two.chapters = two.chapters.slice(0, 2);
+    two.blocks = two.blocks.slice(0, 2);
+    const res = await dispatch(
+      h,
+      new Request(`${BASE}/api/works/${id}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-manage-secret': manageSecret },
+        body: JSON.stringify(two),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(h.r2.keysWithPrefix(`works/${id}/ch/`).sort()).toEqual([
+      `works/${id}/ch/1.html`,
+      `works/${id}/ch/2.html`,
+    ]);
+    expect((await dispatch(h, new Request(`${BASE}/w/${id}/3`))).status).toBe(404);
+  });
+
+  it('explicit multi-chapter: the age gate is baked into the cover AND every chapter page', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h, makeBundle3({ rating: 'explicit', warnings: ['sexual-content'] }));
+    expect(h.r2.store.get(`works/${id}/index.html`)).toContain('id="age-gate"');
+    for (const n of [1, 2, 3]) {
+      const page = h.r2.store.get(`works/${id}/ch/${n}.html`) ?? '';
+      expect(page, `ch/${n}`).toContain('id="age-gate"');
+      expect(page, `ch/${n}`).toContain('<main id="work" hidden>');
+    }
+  });
+
+  it('admin relabel re-bakes chapter pages too', async () => {
+    const h = makeEnv({ ADMIN_SECRET });
+    const { id } = await publish(h, makeBundle3()); // general → no gate
+    expect(h.r2.store.get(`works/${id}/ch/1.html`)).not.toContain('age-gate');
+    const res = await adminPost(h, `/api/admin/works/${id}/relabel`, { rating: 'explicit', warnings: [] });
+    expect(res.status).toBe(200);
+    expect(h.r2.store.get(`works/${id}/ch/1.html`)).toContain('id="age-gate"');
+    expect(h.r2.store.get(`works/${id}/index.html`)).toContain('badge-explicit');
+  });
+
+  it('unpublish deletes the whole works/{id}/ prefix, chapter pages included', async () => {
+    const h = makeEnv();
+    const { id, manageSecret } = await publish(h, makeBundle3());
+    expect(h.r2.keysWithPrefix(`works/${id}/`)).toHaveLength(5); // bundle + index + 3 chapters
+
+    const del = await dispatch(
+      h,
+      new Request(`${BASE}/api/works/${id}`, { method: 'DELETE', headers: { 'x-manage-secret': manageSecret } }),
+    );
+    expect(del.status).toBe(200);
+    expect(h.r2.store.size).toBe(0);
+    expect(h.d1.works.has(id)).toBe(false);
+  });
+
+  it('the purge cron also evaporates chapter pages', async () => {
+    const h = makeEnv();
+    const { id } = await publish(h, makeBundle3());
+    h.d1.works.get(id)!.expires_at = new Date(Date.now() - 1000).toISOString();
+
+    const { ctx, drain } = makeCtx();
+    await worker.scheduled({} as ScheduledController, h.env, ctx);
+    await drain();
+
+    expect(h.r2.store.size).toBe(0);
+    expect(h.d1.works.has(id)).toBe(false);
   });
 });
 

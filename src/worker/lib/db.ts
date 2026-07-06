@@ -135,6 +135,20 @@ export function pageKey(id: string): string {
   return `works/${id}/index.html`;
 }
 
+/** Chapter page n (1-based, reading order over standard + back matter). */
+export function chapterKey(id: string, n: number): string {
+  return `works/${id}/ch/${n}.html`;
+}
+
+export function chapterPrefix(id: string): string {
+  return `works/${id}/ch/`;
+}
+
+/** Everything a work owns in R2 lives under this prefix. */
+export function workPrefix(id: string): string {
+  return `works/${id}/`;
+}
+
 // ---------- operator toolkit (Phase 1.5) ----------
 
 export interface AdminWorkSummary {

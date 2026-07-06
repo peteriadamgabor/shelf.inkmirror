@@ -8,11 +8,12 @@
  */
 
 import { isPublishBundle, validatePublishBundle, type PublishBundleV1 } from '../../format';
-import { countWords, firstLine, renderWorkPage } from '../../render';
+import { countWords, firstLine } from '../../render';
 import type { Env } from '../lib/env';
 import { randomBase64Url, sha256Hex } from '../lib/crypto';
 import { contentHash } from '../lib/content-hash';
-import { bundleKey, getSetting, hasTombstone, insertWork, pageKey } from '../lib/db';
+import { bakeWork } from '../lib/bake';
+import { getSetting, hasTombstone, insertWork } from '../lib/db';
 import { MAX_PUBLISH_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
 
 export const WORK_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -76,14 +77,7 @@ export async function handlePublish(request: Request, env: Env): Promise<Respons
   const nowIso = now.toISOString();
   const expiresAt = new Date(now.getTime() + WORK_TTL_MS).toISOString();
 
-  const html = renderWorkPage(parsed, { id });
-
-  await env.SHELF_R2.put(bundleKey(id), JSON.stringify(parsed), {
-    httpMetadata: { contentType: 'application/json' },
-  });
-  await env.SHELF_R2.put(pageKey(id), html, {
-    httpMetadata: { contentType: 'text/html; charset=utf-8' },
-  });
+  await bakeWork(parsed, id, env);
 
   await insertWork(env.SHELF_DB, {
     id,
