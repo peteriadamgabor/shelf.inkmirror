@@ -3,6 +3,7 @@ import {
   PUBLISH_BUNDLE_KIND,
   PUBLISH_BUNDLE_VERSION,
   isPublishBundle,
+  sanitizePublishBundle,
   validatePublishBundle,
   type PublishBundleV1,
 } from './format';
@@ -90,5 +91,92 @@ describe('validatePublishBundle', () => {
     const b = minimalBundle();
     b.blocks[0]!.marks = [{ type: 'bold', start: 0, end: 9999 }];
     expect(() => validatePublishBundle(b)).toThrow(/mark range/);
+  });
+});
+
+describe('sanitizePublishBundle — constructs a clean object, drops the rest', () => {
+  it('strips unknown top-level, document, chapter, and block fields', () => {
+    const dirty = {
+      ...minimalBundle(),
+      evil: 'should not survive',
+      document: { synopsis: 'ok', pov_character_id: null, notes: 'private' },
+    } as unknown;
+    const clean = sanitizePublishBundle(dirty) as unknown as Record<string, unknown>;
+    expect('evil' in clean).toBe(false);
+    expect('notes' in (clean['document'] as Record<string, unknown>)).toBe(false);
+    expect((clean['document'] as Record<string, unknown>)['synopsis']).toBe('ok');
+  });
+
+  it('rejects scene metadata with a non-string location (the former render crash)', () => {
+    const b = minimalBundle();
+    b.blocks = [
+      {
+        id: 'b1',
+        chapter_id: 'ch1',
+        type: 'scene',
+        content: 'The rain.',
+        order: 0,
+        // @ts-expect-error deliberately hostile input
+        metadata: { type: 'scene', data: { location: 123, time: 'dawn', character_ids: [], mood: '' } },
+      },
+    ];
+    // location is coerced to '' by the sanitizer (never reaches render as a number)
+    const clean = sanitizePublishBundle(b);
+    const meta = clean.blocks[0]!.metadata;
+    expect(meta.type).toBe('scene');
+    if (meta.type === 'scene') expect(meta.data.location).toBe('');
+  });
+
+  it('rejects metadata.type that does not match the block type', () => {
+    const b = minimalBundle();
+    b.blocks = [
+      {
+        id: 'b1',
+        chapter_id: 'ch1',
+        type: 'text',
+        content: 'hi',
+        order: 0,
+        metadata: { type: 'scene', data: { location: '', time: '', character_ids: [], mood: '' } },
+      },
+    ];
+    expect(() => sanitizePublishBundle(b)).toThrow(/does not match block type/);
+  });
+
+  it('rejects duplicate chapter, block, and character ids', () => {
+    const dup = minimalBundle();
+    dup.chapters = [
+      { id: 'ch1', title: 'A', order: 0, kind: 'standard' },
+      { id: 'ch1', title: 'B', order: 1, kind: 'standard' },
+    ];
+    expect(() => sanitizePublishBundle(dup)).toThrow(/duplicate chapter id/);
+  });
+
+  it('still rejects the unstripped-backup tripwires (deleted_at, character notes)', () => {
+    const b1 = minimalBundle();
+    (b1.blocks[0] as unknown as Record<string, unknown>)['deleted_at'] = null;
+    expect(() => sanitizePublishBundle(b1)).toThrow(/unstripped/);
+
+    const b2 = minimalBundle();
+    b2.characters = [{ id: 'c1', name: 'Anna', color: '#7F77DD' }];
+    (b2.characters[0] as unknown as Record<string, unknown>)['notes'] = 'secret';
+    expect(() => sanitizePublishBundle(b2)).toThrow(/unstripped/);
+  });
+
+  it('caps over-long scene fields and parentheticals', () => {
+    const b = minimalBundle();
+    b.characters = [{ id: 'c1', name: 'X', color: '#7F77DD' }];
+    b.blocks = [
+      {
+        id: 'b1',
+        chapter_id: 'ch1',
+        type: 'dialogue',
+        content: 'Hi',
+        order: 0,
+        metadata: { type: 'dialogue', data: { speaker_id: 'c1', parenthetical: 'x'.repeat(9999) } },
+      },
+    ];
+    const clean = sanitizePublishBundle(b);
+    const meta = clean.blocks[0]!.metadata;
+    if (meta.type === 'dialogue') expect((meta.data.parenthetical ?? '').length).toBeLessThanOrEqual(500);
   });
 });

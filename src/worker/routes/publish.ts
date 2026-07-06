@@ -7,7 +7,7 @@
  * touches R2 or D1.
  */
 
-import { isPublishBundle, validatePublishBundle } from '../../format';
+import { isPublishBundle, sanitizePublishBundle, type PublishBundleV1 } from '../../format';
 import { countWords, firstLine } from '../../render';
 import type { Env } from '../lib/env';
 import { randomBase64Url, sha256Hex } from '../lib/crypto';
@@ -67,15 +67,20 @@ export async function handlePublish(
     return jsonError(400, 'invalid_json');
   }
   if (!isPublishBundle(parsed)) return jsonError(400, 'not_a_publish_bundle');
+  // Sanitize into a freshly constructed bundle: ONLY allowlisted, type-checked,
+  // length-capped fields survive — nothing the client sent reaches R2 unless
+  // sanitizePublishBundle copied it deliberately. Everything downstream uses
+  // `clean`, never the raw request body.
+  let clean: PublishBundleV1;
   try {
-    validatePublishBundle(parsed);
+    clean = sanitizePublishBundle(parsed);
   } catch (e) {
     return jsonError(400, 'invalid_bundle', e instanceof Error ? e.message : 'validation failed');
   }
 
   // Computed once: the tombstone gate checks it, the row stores it (the
   // moderation chain's dedup key — see migrations/0006_budget.sql).
-  const bundleHash = await contentHash(parsed);
+  const bundleHash = await contentHash(clean);
   const gate = await publishGates(env, bundleHash);
   if (gate !== null) return gate;
 
@@ -87,18 +92,18 @@ export async function handlePublish(
   const nowIso = now.toISOString();
   const expiresAt = new Date(now.getTime() + WORK_TTL_MS).toISOString();
 
-  await bakeWork(parsed, id, env);
+  await bakeWork(clean, id, env);
 
   await insertWork(env.SHELF_DB, {
     id,
     secret_hash: secretHash,
-    title: parsed.title,
-    pen_name: parsed.pen_name,
-    language: parsed.language,
-    rating: parsed.rating,
-    warnings: parsed.warnings,
-    word_count: countWords(parsed),
-    first_line: firstLine(parsed),
+    title: clean.title,
+    pen_name: clean.pen_name,
+    language: clean.language,
+    rating: clean.rating,
+    warnings: clean.warnings,
+    word_count: countWords(clean),
+    first_line: firstLine(clean),
     content_hash: bundleHash,
     created_at: nowIso,
     updated_at: nowIso,
@@ -108,7 +113,7 @@ export async function handlePublish(
   // Phase 2 shadow chain: content is already stored and baked — the chain
   // only observes in the background. No-op without ANTHROPIC_API_KEY. A fresh
   // publish is never password-locked (the password is set later via manage).
-  scheduleModeration(ctx, env, parsed, id, false);
+  scheduleModeration(ctx, env, clean, id, false);
 
   return Response.json({ id, url: workUrl(id), manageSecret }, { status: 200 });
 }

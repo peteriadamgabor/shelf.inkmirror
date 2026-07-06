@@ -133,6 +133,11 @@ const MAX_CHAPTERS = 2_000;
 const MAX_BLOCKS = 100_000;
 const MAX_CHARACTERS = 2_000;
 const MAX_BLOCK_CONTENT = 50_000;
+const MAX_CHAPTER_TITLE = 500;
+const MAX_CHARACTER_NAME = 200;
+const MAX_SCENE_FIELD = 500;
+const MAX_PARENTHETICAL = 500;
+const MAX_LANGUAGE = 35;
 
 const RATING_SET = new Set<string>(RATINGS);
 const WARNING_SET = new Set<string>(WARNING_TAGS);
@@ -288,4 +293,206 @@ function validateMarks(blockId: string, marks: unknown, contentLength: number): 
       throw new Error(`block "${blockId}" mark range invalid`);
     }
   }
+}
+
+// ---------- sanitizer ----------
+//
+// The security-critical entry point. validatePublishBundle checks a shape but
+// leaves the ORIGINAL object intact, so unknown fields (document.notes, an
+// unstripped block field, a hostile top-level key) would be stored verbatim
+// in R2. sanitizePublishBundle instead CONSTRUCTS a brand-new bundle holding
+// only allowlisted, type-checked, length-capped values — nothing the client
+// sent survives unless this function copied it deliberately. Publish/update
+// store the RESULT, never the request body.
+
+function capStr(x: unknown, max: number): string {
+  return typeof x === 'string' ? x.slice(0, max) : '';
+}
+
+function sanitizeMarks(blockId: string, marks: unknown, contentLength: number): Mark[] | undefined {
+  if (marks === undefined) return undefined;
+  validateMarks(blockId, marks, contentLength);
+  const out: Mark[] = (marks as Array<Record<string, unknown>>).map((m) => ({
+    type: m['type'] === 'bold' ? 'bold' : 'italic',
+    start: m['start'] as number,
+    end: m['end'] as number,
+  }));
+  return out.length > 0 ? out : undefined;
+}
+
+function sanitizeMetadata(
+  blockId: string,
+  blockType: PublishedBlockType,
+  meta: unknown,
+  characterIds: Set<string>,
+): PublishedBlockMetadata {
+  if (!isPlainObject(meta)) throw new Error(`block "${blockId}" metadata invalid`);
+  // The declared metadata.type must match the block's own type — a scene
+  // body with dialogue metadata (or vice versa) is a malformed artifact.
+  if (meta['type'] !== blockType) {
+    throw new Error(`block "${blockId}" metadata.type does not match block type`);
+  }
+  if (blockType === 'text') return { type: 'text' };
+  if (blockType === 'dialogue') {
+    const data = meta['data'];
+    if (!isPlainObject(data)) throw new Error(`block "${blockId}" dialogue data missing`);
+    const rawSpeaker = data['speaker_id'];
+    const speaker_id =
+      typeof rawSpeaker === 'string' && (rawSpeaker === '' || characterIds.has(rawSpeaker))
+        ? rawSpeaker
+        : '';
+    const rawParen = data['parenthetical'];
+    if (typeof rawParen === 'string' && rawParen.length > 0) {
+      return { type: 'dialogue', data: { speaker_id, parenthetical: rawParen.slice(0, MAX_PARENTHETICAL) } };
+    }
+    return { type: 'dialogue', data: { speaker_id } };
+  }
+  // scene
+  const data = meta['data'];
+  if (!isPlainObject(data)) throw new Error(`block "${blockId}" scene data missing`);
+  const rawIds = Array.isArray(data['character_ids']) ? data['character_ids'] : [];
+  const character_ids = rawIds.filter(
+    (x): x is string => typeof x === 'string' && characterIds.has(x),
+  );
+  return {
+    type: 'scene',
+    data: {
+      location: capStr(data['location'], MAX_SCENE_FIELD),
+      time: capStr(data['time'], MAX_SCENE_FIELD),
+      character_ids,
+      mood: capStr(data['mood'], MAX_SCENE_FIELD),
+    },
+  };
+}
+
+/**
+ * Build a clean PublishBundleV1 from untrusted input, or throw. The returned
+ * object is freshly constructed — the only fields that survive are the ones
+ * copied here. Duplicate ids, mismatched metadata types, and over-long
+ * strings are rejected or capped. This is what the server stores.
+ */
+export function sanitizePublishBundle(x: unknown): PublishBundleV1 {
+  if (!isPublishBundle(x)) throw new Error('not a publish bundle');
+  const raw = x as unknown as Record<string, unknown>;
+
+  const title = raw['title'];
+  if (!isNonEmptyString(title) || title.length > MAX_TITLE) throw new Error('title missing or too long');
+  const penName = raw['pen_name'];
+  if (!isNonEmptyString(penName) || penName.length > MAX_PEN_NAME) throw new Error('pen_name missing or too long');
+  const language = raw['language'];
+  if (!isNonEmptyString(language) || language.length > MAX_LANGUAGE) throw new Error('language missing or invalid');
+  const rating = raw['rating'];
+  if (typeof rating !== 'string' || !RATING_SET.has(rating)) throw new Error('invalid rating');
+  const warningsRaw = raw['warnings'];
+  if (!Array.isArray(warningsRaw)) throw new Error('warnings not an array');
+  const warnings: WarningTag[] = [];
+  for (const w of warningsRaw) {
+    if (typeof w !== 'string' || !WARNING_SET.has(w)) throw new Error(`unknown warning tag "${String(w)}"`);
+    if (!warnings.includes(w as WarningTag)) warnings.push(w as WarningTag);
+  }
+
+  const doc = raw['document'];
+  if (!isPlainObject(doc)) throw new Error('document missing');
+  const synopsis = doc['synopsis'];
+  if (typeof synopsis !== 'string' || synopsis.length > MAX_SYNOPSIS) throw new Error('document.synopsis invalid');
+
+  const charsRaw = raw['characters'];
+  if (!Array.isArray(charsRaw)) throw new Error('characters not an array');
+  if (charsRaw.length > MAX_CHARACTERS) throw new Error('too many characters');
+  const characterIds = new Set<string>();
+  const characters: PublishedCharacter[] = charsRaw.map((c) => {
+    if (!isPlainObject(c) || !isNonEmptyString(c['id'])) throw new Error('character id invalid');
+    const id = c['id'];
+    if (characterIds.has(id)) throw new Error(`duplicate character id "${id}"`);
+    if (!isNonEmptyString(c['name'])) throw new Error(`character "${id}" name missing`);
+    if (typeof c['color'] !== 'string') throw new Error(`character "${id}" color invalid`);
+    // Sanitizing would silently drop these, but their PRESENCE means the
+    // client failed to strip — a real bug worth failing loudly on, not hiding.
+    for (const key of ['notes', 'aliases', 'description']) {
+      if (key in c) throw new Error(`character "${id}" carries private field "${key}" — unstripped bundle`);
+    }
+    characterIds.add(id);
+    return { id, name: (c['name'] as string).slice(0, MAX_CHARACTER_NAME), color: c['color'].slice(0, 32) };
+  });
+
+  const rawPov = doc['pov_character_id'];
+  const pov_character_id =
+    typeof rawPov === 'string' && characterIds.has(rawPov) ? rawPov : null;
+
+  const chaptersRaw = raw['chapters'];
+  if (!Array.isArray(chaptersRaw) || chaptersRaw.length === 0) throw new Error('chapters missing or empty');
+  if (chaptersRaw.length > MAX_CHAPTERS) throw new Error('too many chapters');
+  const chapterIds = new Set<string>();
+  const chapters: PublishedChapter[] = chaptersRaw.map((ch) => {
+    if (!isPlainObject(ch) || !isNonEmptyString(ch['id'])) throw new Error('chapter id invalid');
+    const id = ch['id'];
+    if (chapterIds.has(id)) throw new Error(`duplicate chapter id "${id}"`);
+    if (typeof ch['title'] !== 'string') throw new Error(`chapter "${id}" title invalid`);
+    if (typeof ch['order'] !== 'number' || !Number.isFinite(ch['order'])) throw new Error(`chapter "${id}" order invalid`);
+    if (typeof ch['kind'] !== 'string' || !KIND_SET.has(ch['kind'])) throw new Error(`chapter "${id}" has invalid kind`);
+    chapterIds.add(id);
+    const out: PublishedChapter = {
+      id,
+      title: ch['title'].slice(0, MAX_CHAPTER_TITLE),
+      order: ch['order'],
+      kind: ch['kind'] as ChapterKind,
+    };
+    if (typeof ch['export_title'] === 'boolean') out.export_title = ch['export_title'];
+    return out;
+  });
+
+  const blocksRaw = raw['blocks'];
+  if (!Array.isArray(blocksRaw)) throw new Error('blocks not an array');
+  if (blocksRaw.length > MAX_BLOCKS) throw new Error('too many blocks');
+  const blockIds = new Set<string>();
+  const blocks: PublishedBlock[] = blocksRaw.map((b) => {
+    if (!isPlainObject(b) || !isNonEmptyString(b['id'])) throw new Error('block id invalid');
+    const id = b['id'];
+    if (blockIds.has(id)) throw new Error(`duplicate block id "${id}"`);
+    const type = b['type'];
+    if (typeof type !== 'string' || !BLOCK_TYPE_SET.has(type)) {
+      throw new Error(`block "${id}" has non-publishable type "${String(type)}"`);
+    }
+    // Loud failure on the known unstripped-backup signal (graveyard fields,
+    // per-block timestamps) — everything else unknown is just dropped.
+    for (const key of FORBIDDEN_BLOCK_KEYS) {
+      if (key in b) throw new Error(`block "${id}" carries "${key}" — unstripped bundle`);
+    }
+    if (typeof b['content'] !== 'string' || b['content'].length > MAX_BLOCK_CONTENT) {
+      throw new Error(`block "${id}" content invalid or too long`);
+    }
+    if (typeof b['order'] !== 'number' || !Number.isFinite(b['order'])) throw new Error(`block "${id}" order invalid`);
+    if (!isNonEmptyString(b['chapter_id']) || !chapterIds.has(b['chapter_id'])) {
+      throw new Error(`block "${id}" chapter_id has no matching chapter`);
+    }
+    blockIds.add(id);
+    const content = b['content'];
+    const blockType = type as PublishedBlockType;
+    const out: PublishedBlock = {
+      id,
+      chapter_id: b['chapter_id'],
+      type: blockType,
+      content,
+      order: b['order'],
+      metadata: sanitizeMetadata(id, blockType, b['metadata'], characterIds),
+    };
+    const marks = sanitizeMarks(id, b['marks'], content.length);
+    if (marks !== undefined) out.marks = marks;
+    return out;
+  });
+
+  return {
+    kind: PUBLISH_BUNDLE_KIND,
+    version: PUBLISH_BUNDLE_VERSION,
+    app_version: capStr(raw['app_version'], 64),
+    title,
+    pen_name: penName,
+    language,
+    rating: rating as Rating,
+    warnings,
+    document: { synopsis, pov_character_id },
+    chapters,
+    blocks,
+    characters,
+  };
 }

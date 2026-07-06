@@ -11,7 +11,7 @@
  * passes the password gate.
  */
 
-import { isPublishBundle, validatePublishBundle } from '../../format';
+import { isPublishBundle, sanitizePublishBundle, type PublishBundleV1 } from '../../format';
 import { countWords, firstLine } from '../../render';
 import type { Env } from '../lib/env';
 import { constantTimeEqualHex, sha256Hex } from '../lib/crypto';
@@ -285,15 +285,18 @@ async function update(
     return jsonError(400, 'invalid_json');
   }
   if (!isPublishBundle(parsed)) return jsonError(400, 'not_a_publish_bundle');
+  // Same sanitizer as first publish: store only a freshly constructed bundle,
+  // never the raw request body.
+  let clean: PublishBundleV1;
   try {
-    validatePublishBundle(parsed);
+    clean = sanitizePublishBundle(parsed);
   } catch (e) {
     return jsonError(400, 'invalid_bundle', e instanceof Error ? e.message : 'validation failed');
   }
 
   // Updates pass the same operator gates as first publishes — a tombstoned
   // text must not slip back in as an "update" to an unrelated work.
-  const bundleHash = await contentHash(parsed);
+  const bundleHash = await contentHash(clean);
   const gate = await publishGates(env, bundleHash);
   if (gate !== null) return gate;
 
@@ -307,10 +310,10 @@ async function update(
   const artifactUnchanged =
     row.content_hash !== null &&
     row.content_hash === bundleHash &&
-    row.rating === parsed.rating &&
-    row.warnings === JSON.stringify(parsed.warnings);
+    row.rating === clean.rating &&
+    row.warnings === JSON.stringify(clean.warnings);
 
-  await bakeWork(parsed, row.id, env);
+  await bakeWork(clean, row.id, env);
 
   // A real change drops any listing (critical: a listed work cannot be
   // mutated out from under the review that approved it) and clears the stale
@@ -319,13 +322,13 @@ async function update(
 
   const updatedAt = new Date().toISOString();
   await updateWork(env.SHELF_DB, row.id, {
-    title: parsed.title,
-    pen_name: parsed.pen_name,
-    language: parsed.language,
-    rating: parsed.rating,
-    warnings: parsed.warnings,
-    word_count: countWords(parsed),
-    first_line: firstLine(parsed),
+    title: clean.title,
+    pen_name: clean.pen_name,
+    language: clean.language,
+    rating: clean.rating,
+    warnings: clean.warnings,
+    word_count: countWords(clean),
+    first_line: firstLine(clean),
     content_hash: bundleHash,
     updated_at: updatedAt,
     resetModeration: !artifactUnchanged,
@@ -333,7 +336,7 @@ async function update(
 
   // Updates re-run the shadow chain the same as first publishes — the new
   // text is already baked; the chain only observes. No-op without the key.
-  if (!artifactUnchanged) scheduleModeration(ctx, env, parsed, row.id, row.password_hash !== null);
+  if (!artifactUnchanged) scheduleModeration(ctx, env, clean, row.id, row.password_hash !== null);
 
   return Response.json({ ok: true, id: row.id, url: workUrl(row.id), updated_at: updatedAt, delisted });
 }
