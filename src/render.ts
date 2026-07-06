@@ -154,21 +154,24 @@ function renderBlock(b: PublishedBlock, ctx: RenderCtx): string {
 }
 
 function renderDialogue(b: PublishedBlock, ctx: RenderCtx): string {
+  // Novel-first: dialogue reads as prose. Attribution lives in the writer's
+  // own text ("— felelte Eve…"), so no name pill, no chat bubble, no POV
+  // right-alignment — those are editor instruments, not reader furniture
+  // (and speaker records are often placeholders never meant to be shown).
+  // What remains is a whisper: a thin left accent in the character's color.
   const data = b.metadata.type === 'dialogue' ? b.metadata.data : { speaker_id: '' };
   const speaker = data.speaker_id === '' ? undefined : ctx.characters.get(data.speaker_id);
   const isPov = data.speaker_id !== '' && data.speaker_id === ctx.povCharacterId;
-  const accent = isPov ? POV_ACCENT : speakerAccent(speaker?.color);
+  const accent =
+    speaker === undefined ? 'var(--line)' : isPov ? POV_ACCENT : speakerAccent(speaker.color);
 
-  const pill = speaker
-    ? `<span class="pill">${escapeHtml(speaker.name)}</span>`
-    : '';
   const paren =
     'parenthetical' in data && typeof data.parenthetical === 'string' && data.parenthetical.length > 0
       ? `<div class="paren">${escapeHtml(data.parenthetical)}</div>`
       : '';
 
-  return `<div class="dlg${isPov ? ' dlg-pov' : ''}" style="--accent:${accent}">
-${pill}<div class="bubble">${paren}<div class="dlg-text">${renderMarkedContent(b.content, b.marks)}</div></div>
+  return `<div class="dlg" style="--accent:${accent}">
+${paren}<div class="dlg-text">${renderMarkedContent(b.content, b.marks)}</div>
 </div>`;
 }
 
@@ -268,23 +271,9 @@ main{max-width:42rem;margin:0 auto;padding:0 1.25rem 4rem}
   font-variant-caps:all-small-caps;letter-spacing:.14em;color:var(--muted);
   margin:0 0 1.2em;
 }
-.dlg{max-width:88%;margin:0 0 1.1em;--accent:var(--teal)}
-.dlg-pov{margin-left:auto;text-align:right}
-.pill{
-  display:inline-block;font-family:var(--sans);font-size:11px;font-weight:600;
-  letter-spacing:.1em;text-transform:uppercase;line-height:1;
-  color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);
-  padding:4px 9px;border-radius:999px;margin:0 0 .35rem;
-}
-.bubble{
-  text-align:left;
-  background:color-mix(in srgb,var(--accent) 7%,var(--surface));
-  border:1px solid var(--line);border-left:2px solid var(--accent);
-  border-radius:12px;padding:.7rem 1rem;
-}
-.dlg-pov .bubble{border-left:1px solid var(--line);border-right:2px solid var(--accent)}
-.paren{font-family:var(--serif);font-style:italic;font-size:.9rem;color:var(--muted);margin:0 0 .3em}
-.dlg-text{font-family:var(--serif);font-size:1.0625rem;white-space:pre-wrap;overflow-wrap:break-word}
+.dlg{margin:0 0 1.1em;padding-left:.9rem;border-left:2px solid color-mix(in srgb,var(--accent) 55%,transparent);--accent:var(--line)}
+.paren{font-family:var(--serif);font-style:italic;font-size:.9rem;color:var(--muted);margin:0 0 .2em}
+.dlg-text{font-family:var(--serif);font-size:1.0625rem;line-height:inherit;white-space:pre-wrap;overflow-wrap:break-word}
 .work-foot{margin-top:3.5rem;padding:0 0 .75rem;text-align:center;font-family:var(--sans);font-size:.8rem;color:var(--muted)}
 .foot-mark{font-family:var(--serif);font-size:1rem;color:var(--muted);opacity:.7;margin-bottom:1.1rem}
 .foot-meta{margin:0 0 .4rem}

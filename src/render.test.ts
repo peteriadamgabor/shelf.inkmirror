@@ -81,9 +81,9 @@ describe('renderWorkPage — escaping', () => {
     );
     expect(html).not.toContain('<script>alert(1)');
     expect(html).not.toContain('<img src=x');
-    expect(html).not.toContain('<b>Evil</b>');
+    // Character names never render on the reading page (novel-first dialogue).
+    expect(html).not.toContain('Evil');
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
-    expect(html).toContain('&lt;b&gt;Evil&lt;/b&gt;');
     expect(html).toContain('hello &amp; &lt;goodbye&gt;');
   });
 
@@ -149,7 +149,7 @@ describe('renderWorkPage — dialogue', () => {
     };
   }
 
-  it('POV speaker dialogue gets the right-aligned class, others do not', () => {
+  it('dialogue renders as prose with a color accent — no pills, bubbles, or POV alignment', () => {
     const html = renderWorkPage(
       bundle({
         characters: chars,
@@ -160,17 +160,17 @@ describe('renderWorkPage — dialogue', () => {
     );
     const blockAround = (marker: string): string => {
       const end = html.indexOf(marker);
-      // The outer wrapper is `<div class="dlg"` or `<div class="dlg dlg-pov"`
-      // (the inner `.dlg-text` div would also match a bare "dlg" prefix).
-      const start = Math.max(html.lastIndexOf('<div class="dlg"', end), html.lastIndexOf('<div class="dlg ', end));
+      const start = html.lastIndexOf('<div class="dlg"', end);
       return html.slice(start, end);
     };
-    const povBlock = blockAround('line b1');
-    const otherBlock = blockAround('line b2');
-    expect(povBlock).toContain('dlg-pov');
-    expect(povBlock).toContain('--accent:var(--violet)');
-    expect(otherBlock).not.toContain('dlg-pov');
-    expect(otherBlock).toContain('--accent:#0d9488');
+    expect(blockAround('line b1')).toContain('--accent:var(--violet)');
+    expect(blockAround('line b2')).toContain('--accent:#0d9488');
+    // Editor furniture must not reach readers.
+    expect(html).not.toContain('dlg-pov');
+    expect(html).not.toContain('class="pill"');
+    expect(html).not.toContain('class="bubble"');
+    expect(html).not.toContain('Ilka');
+    expect(html).not.toContain('Bora');
   });
 
   it('invalid character color falls back to teal', () => {
@@ -185,9 +185,9 @@ describe('renderWorkPage — dialogue', () => {
     expect(html).not.toContain('url(evil)');
   });
 
-  it('unassigned speaker renders a teal bubble without a pill', () => {
+  it('unassigned speaker gets the neutral hairline accent', () => {
     const html = renderWorkPage(bundle({ blocks: [dlg('b1', '', 0)] }), META);
-    expect(html).toContain('style="--accent:var(--teal)"');
+    expect(html).toContain('style="--accent:var(--line)"');
     expect(html).not.toContain('class="pill"');
   });
 
