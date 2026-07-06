@@ -38,9 +38,12 @@ export function jsonError(status: number, code: string, detail?: string): Respon
 export async function readBodyCapped(request: Request, capBytes: number): Promise<string | null> {
   const cl = Number(request.headers.get('content-length') ?? '');
   if (Number.isFinite(cl) && cl > capBytes) return null;
-  const text = await request.text();
-  if (text.length > capBytes) return null;
-  return text;
+  // Measure ACTUAL bytes, not JS string length: a multibyte payload can have a
+  // character count under the cap while exceeding it in bytes. Content-Length
+  // is a hint (checked above); the buffer length is the real limit.
+  const buf = await request.arrayBuffer();
+  if (buf.byteLength > capBytes) return null;
+  return new TextDecoder().decode(buf);
 }
 
 /** Reflected-origin CORS headers when the caller is an allowed origin. */

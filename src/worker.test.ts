@@ -862,9 +862,42 @@ describe('POST /api/works/:id/report', () => {
 
   it('webhook unset → still accepted, D1 keeps the record (Discord is only the doorbell)', async () => {
     const h = makeEnv();
-    const res = await dispatch(h, formReport({ reason: 'other', message: '', website: '', ts: String(Date.now() - 5000) }));
+    const { id } = await publish(h);
+    const res = await dispatch(
+      h,
+      new Request(`${BASE}/api/works/${id}/report`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ reason: 'other', message: '', website: '', ts: String(Date.now() - 5000) }).toString(),
+      }),
+    );
     expect(res.status).toBe(200);
     expect(h.d1.reports).toHaveLength(1);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('report for a nonexistent work is silently accepted but stores nothing (no orphan, no oracle)', async () => {
+    const h = makeEnv({ DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const res = await dispatch(h, formReport({ reason: 'other', message: 'hi', website: '', ts: String(Date.now() - 5000) }));
+    expect(res.status).toBe(200); // no oracle — same as a real accept
+    expect(h.d1.reports).toHaveLength(0); // …but nothing stored
+    expect(fetch).not.toHaveBeenCalled(); // …and no Discord noise
+  });
+
+  it('ts=0 (and missing/old) fail the render gate — the bypass is closed', async () => {
+    const h = makeEnv({ DISCORD_WEBHOOK: 'https://discord.example/hook' });
+    const { id } = await publish(h);
+    const report = (ts: string): Request =>
+      new Request(`${BASE}/api/works/${id}/report`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ reason: 'other', message: 'x', website: '', ts }).toString(),
+      });
+    for (const ts of ['0', '', String(Date.now() - 48 * 60 * 60 * 1000), String(Date.now() + 60_000)]) {
+      const res = await dispatch(h, report(ts));
+      expect(res.status).toBe(200); // silent-accept, like the honeypot
+    }
+    expect(h.d1.reports).toHaveLength(0); // none stored
     expect(fetch).not.toHaveBeenCalled();
   });
 });

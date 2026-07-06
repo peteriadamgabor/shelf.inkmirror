@@ -25,6 +25,19 @@ import { getActiveWork, notFoundPage, passwordGate } from './read';
 export const REPORT_REASONS = new Set(['mislabeled', 'hard-line', 'plagiarism', 'other']);
 const MAX_MESSAGE = 1000;
 const MIN_RENDER_MS = 2000;
+const MAX_TS_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The render-to-submit gate. A trustworthy timestamp is an integer at least
+ * MIN_RENDER_MS old (bots submit instantly) and no more than a day old (a
+ * replayed or absurd value). Missing (NaN), zero, and future timestamps all
+ * fall outside the window and are rejected — closing the ts=0 bypass.
+ */
+export function tsFresh(ts: number): boolean {
+  if (!Number.isFinite(ts) || !Number.isInteger(ts)) return false;
+  const age = Date.now() - ts;
+  return age >= MIN_RENDER_MS && age <= MAX_TS_AGE_MS;
+}
 
 const TURNSTILE_VERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 
@@ -146,7 +159,12 @@ export async function handleReport(request: Request, env: Env, id: string): Prom
 
   // Honeypot filled, or the render-time gate failed → silent success, nothing stored.
   if (fields.website.trim().length > 0) return ok();
-  if (!Number.isFinite(fields.ts) || Date.now() - fields.ts < MIN_RENDER_MS) return ok();
+  if (!tsFresh(fields.ts)) return ok();
+
+  // Never insert a report (or ring Discord) for a work that does not exist or
+  // is not active — no orphan reports, no oracle (silent success either way).
+  const work = await getActiveWork(env, id);
+  if (work === null) return ok();
 
   if (turnstileEnabled(env) && !(await verifyTurnstile(env, fields.turnstileToken, ip))) {
     return jsonError(403, 'verification_failed');

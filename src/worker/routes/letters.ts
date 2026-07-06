@@ -26,14 +26,13 @@ import { escapeHtml, htmlResponse, pageShell } from '../../html';
 import { randomBase64Url } from '../lib/crypto';
 import { evictLettersBeyond, insertLetter } from '../lib/db';
 import { MAX_REPORT_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
-import { FORM_PAGE_CSS, TURNSTILE_CSP, turnstileEnabled, verifyTurnstile } from './report';
+import { FORM_PAGE_CSS, TURNSTILE_CSP, tsFresh, turnstileEnabled, verifyTurnstile } from './report';
 import { getActiveWork, notFoundPage, passwordGate } from './read';
 
 export const MAX_LETTER_BODY = 4000;
 export const MAX_LETTER_CONTACT = 200;
 /** Per-work storage cap — beyond it the oldest letters are evicted. */
 export const LETTERS_PER_WORK_CAP = 500;
-const MIN_RENDER_MS = 2000;
 
 interface LetterFields {
   body: string;
@@ -119,7 +118,7 @@ export async function handleLetterSubmit(request: Request, env: Env, id: string)
 
   // Honeypot filled, or the render-time gate failed → silent success, nothing stored.
   if (fields.website.trim().length > 0) return ok();
-  if (!Number.isFinite(fields.ts) || Date.now() - fields.ts < MIN_RENDER_MS) return ok();
+  if (!tsFresh(fields.ts)) return ok();
 
   if (turnstileEnabled(env) && !(await verifyTurnstile(env, fields.turnstileToken, ip))) {
     return jsonError(403, 'verification_failed');
