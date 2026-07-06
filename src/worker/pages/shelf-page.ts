@@ -22,6 +22,7 @@ import { RATINGS, type Rating } from '../../format';
 import { escapeHtml, htmlResponse, pageShell } from '../../html';
 import type { Env } from '../lib/env';
 import { countShelfWorks, listShelfWorks, type ShelfCard, type ShelfFilters } from '../lib/db';
+import { t, type Lang } from '../i18n';
 
 export const SHELF_PAGE_SIZE = 24;
 const MAX_PAGE = 10_000;
@@ -142,26 +143,26 @@ function parseWarningCount(raw: string): number {
   }
 }
 
-function chipRow(q: ShelfQuery): string {
+function chipRow(q: ShelfQuery, lang: Lang): string {
   const chips = [
-    { label: 'All', rating: null as string | null },
-    ...RATINGS.map((r) => ({ label: r.charAt(0).toUpperCase() + r.slice(1), rating: r as string | null })),
+    { label: t(lang, 'shelf.filterAll'), rating: null as string | null },
+    ...RATINGS.map((r) => ({ label: t(lang, 'rating.' + r), rating: r as string | null })),
   ]
     .map((c) => {
       const active = q.rating === c.rating;
-      return `<a class="chip${active ? ' active' : ''}" href="${shelfUrl(c.rating, q.language, 1)}">${c.label}</a>`;
+      return `<a class="chip${active ? ' active' : ''}" href="${shelfUrl(c.rating, q.language, 1)}">${escapeHtml(c.label)}</a>`;
     })
     .join('\n');
   // A language filter arrives by link/URL, not a picker — when active it
   // shows as a removable chip so the reader can see and clear it.
-  const lang =
+  const langChip =
     q.language !== null
-      ? `\n<a class="chip active" href="${shelfUrl(q.rating, null, 1)}">Language: ${escapeHtml(q.language.toUpperCase())} &times;</a>`
+      ? `\n<a class="chip active" href="${shelfUrl(q.rating, null, 1)}">${escapeHtml(t(lang, 'shelf.language'))}: ${escapeHtml(q.language.toUpperCase())} &times;</a>`
       : '';
-  return `<nav class="chips" aria-label="Filters">\n${chips}${lang}\n</nav>`;
+  return `<nav class="chips" aria-label="${escapeHtml(t(lang, 'shelf.filtersLabel'))}">\n${chips}${langChip}\n</nav>`;
 }
 
-function card(w: ShelfCard): string {
+function card(w: ShelfCard, lang: Lang): string {
   const [from, to] = coverGradient(w.id);
   const warnCount = parseWarningCount(w.warnings);
   const explicit = w.rating === 'explicit';
@@ -171,8 +172,9 @@ function card(w: ShelfCard): string {
     !explicit && w.first_line.trim().length > 0
       ? `<p class="card-first">${escapeHtml(w.first_line)}</p>`
       : '';
-  const warnings = warnCount > 0 ? `<span class="warn-count">+${warnCount} warning${warnCount === 1 ? '' : 's'}</span>` : '';
-  const lang =
+  const warnWord = t(lang, warnCount === 1 ? 'shelf.warnOne' : 'shelf.warnMany');
+  const warnings = warnCount > 0 ? `<span class="warn-count">+${warnCount} ${escapeHtml(warnWord)}</span>` : '';
+  const langTag =
     w.language.toLowerCase() !== 'en'
       ? `<span class="lang-tag">${escapeHtml(w.language.toUpperCase())}</span>`
       : '';
@@ -183,24 +185,24 @@ function card(w: ShelfCard): string {
 </div>
 <h2 class="card-title">${escapeHtml(w.title)}</h2>
 ${firstLine}
-<div class="card-meta"><span class="badge badge-${escapeHtml(w.rating)}">${escapeHtml(w.rating)}</span>${warnings}</div>
-<div class="card-sub"><span class="nums">${w.word_count.toLocaleString('en-US')} words</span>${lang}</div>
+<div class="card-meta"><span class="badge badge-${escapeHtml(w.rating)}">${escapeHtml(t(lang, 'rating.' + w.rating))}</span>${warnings}</div>
+<div class="card-sub"><span class="nums">${w.word_count.toLocaleString('en-US')} ${escapeHtml(t(lang, 'read.foot.words'))}</span>${langTag}</div>
 </a>`;
 }
 
-function pager(q: ShelfQuery, hasOlder: boolean): string {
+function pager(q: ShelfQuery, hasOlder: boolean, lang: Lang): string {
   if (q.page <= 1 && !hasOlder) return '';
   const newer =
     q.page > 1
-      ? `<a href="${shelfUrl(q.rating, q.language, q.page - 1)}" rel="prev">&larr; Newer</a>`
+      ? `<a href="${shelfUrl(q.rating, q.language, q.page - 1)}" rel="prev">&larr; ${escapeHtml(t(lang, 'shelf.newer'))}</a>`
       : '<span></span>';
   const older = hasOlder
-    ? `<a href="${shelfUrl(q.rating, q.language, q.page + 1)}" rel="next">Older &rarr;</a>`
+    ? `<a href="${shelfUrl(q.rating, q.language, q.page + 1)}" rel="next">${escapeHtml(t(lang, 'shelf.older'))} &rarr;</a>`
     : '<span></span>';
-  return `<nav class="pager" aria-label="Pages">${newer}<span class="spacer"></span>${older}</nav>`;
+  return `<nav class="pager" aria-label="${escapeHtml(t(lang, 'shelf.pages'))}">${newer}<span class="spacer"></span>${older}</nav>`;
 }
 
-export async function shelfPage(url: URL, env: Env): Promise<Response> {
+export async function shelfPage(url: URL, env: Env, lang: Lang = 'en'): Promise<Response> {
   const q = parseQuery(url);
   const filters: ShelfFilters = { rating: q.rating, language: q.language };
 
@@ -213,36 +215,39 @@ export async function shelfPage(url: URL, env: Env): Promise<Response> {
   const hasOlder = rows.length > SHELF_PAGE_SIZE;
   const cards = rows.slice(0, SHELF_PAGE_SIZE);
 
+  const brand = escapeHtml(t(lang, 'brand'));
+  const houseRules = `<a href="/rules">${escapeHtml(t(lang, 'houseRules'))}</a>`;
   const grid =
     cards.length > 0
-      ? `<div class="grid">\n${cards.map(card).join('\n')}\n</div>`
-      : `<p class="empty">Nothing on this shelf yet &mdash; the books are still being written.</p>`;
+      ? `<div class="grid">\n${cards.map((w) => card(w, lang)).join('\n')}\n</div>`
+      : `<p class="empty">${t(lang, 'shelf.empty')}</p>`;
 
+  const workWord = t(lang, total === 1 ? 'shelf.workOne' : 'shelf.workMany');
   const body = `<div class="shelf-page">
 <div class="topbar">
-<a class="topbar-mark" href="/">The Shelf<span class="dot">.</span></a>
-<span class="topbar-links"><a href="/rules">House rules</a></span>
+<a class="topbar-mark" href="/">${brand}<span class="dot">.</span></a>
+<span class="topbar-links">${houseRules}</span>
 </div>
 <header class="shelf-head">
 <div class="shelf-hearts" aria-hidden="true"><span class="shelf-heart violet"></span><span class="shelf-heart ember"></span></div>
-<h1>The Shelf<span class="dot">.</span></h1>
-<p class="shelf-tag">Works published from the InkMirror editor. Every writer chose to put these here.</p>
-<p class="shelf-count nums">${total.toLocaleString('en-US')} work${total === 1 ? '' : 's'}</p>
+<h1>${brand}<span class="dot">.</span></h1>
+<p class="shelf-tag">${escapeHtml(t(lang, 'shelf.tagline'))}</p>
+<p class="shelf-count nums">${total.toLocaleString('en-US')} ${escapeHtml(workWord)}</p>
 </header>
-${chipRow(q)}
+${chipRow(q, lang)}
 ${grid}
-${pager(q, hasOlder)}
+${pager(q, hasOlder, lang)}
 <footer class="shelf-foot">
-<p>Every listed work passed a moderation review at listing time &mdash; labels and legality, never themes.
-<a href="/rules">House rules</a> &middot; <a href="https://inkmirror.cc" rel="noopener">Written with InkMirror</a></p>
+<p>${t(lang, 'shelf.footNote')}
+${houseRules} &middot; <a href="https://inkmirror.cc" rel="noopener">${escapeHtml(t(lang, 'read.foot.mark'))}</a></p>
 </footer>
 </div>`;
 
   return htmlResponse(
     pageShell({
-      title: 'The Shelf — works published from InkMirror',
-      description:
-        'Browse works their writers chose to publish from the InkMirror editor — honest labels, quiet reading, no accounts, no feeds, no rankings.',
+      title: t(lang, 'shelf.docTitle'),
+      lang,
+      description: t(lang, 'shelf.description'),
       indexable: true,
       css: SHELF_CSS,
       body,

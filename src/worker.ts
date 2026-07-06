@@ -44,6 +44,7 @@ import { handleLetterSubmit, letterPage } from './worker/routes/letters';
 import { handleUnlock } from './worker/routes/unlock';
 import { handleAdmin } from './worker/routes/admin';
 import { handleRead, handleReadChapter, notFoundPage } from './worker/routes/read';
+import { langForRequest } from './worker/i18n';
 import { landingPage } from './worker/pages/landing';
 import { shelfPage } from './worker/pages/shelf-page';
 import { rulesPage } from './worker/pages/rules';
@@ -184,7 +185,7 @@ async function route(
   const readMatch = path.match(/^\/w\/([^/]{1,64})(\/(manage|report|letter))?$/);
   if (readMatch && method === 'GET') {
     const [, id, , sub] = readMatch;
-    if (!WORK_ID_RE.test(id ?? '')) return notFoundPage();
+    if (!WORK_ID_RE.test(id ?? '')) return notFoundPage(langForRequest(request, url));
     const workId = id ?? '';
     if (sub === 'manage') return managePage(workId);
     if (sub === 'report') return await reportPage(request, env, workId);
@@ -196,7 +197,7 @@ async function route(
   const unlockMatch = path.match(/^\/w\/([^/]{1,64})\/unlock$/);
   if (unlockMatch && method === 'POST') {
     const [, id] = unlockMatch;
-    if (!WORK_ID_RE.test(id ?? '')) return notFoundPage();
+    if (!WORK_ID_RE.test(id ?? '')) return notFoundPage(langForRequest(request, url));
     return await handleUnlock(request, env, id ?? '');
   }
 
@@ -205,16 +206,16 @@ async function route(
   const chapterMatch = path.match(/^\/w\/([^/]{1,64})\/([1-9]\d{0,2})$/);
   if (chapterMatch && method === 'GET') {
     const [, id, n] = chapterMatch;
-    if (!WORK_ID_RE.test(id ?? '')) return notFoundPage();
+    if (!WORK_ID_RE.test(id ?? '')) return notFoundPage(langForRequest(request, url));
     return await handleReadChapter(request, env, id ?? '', Number(n));
   }
 
-  if (method === 'GET' && path === '/') return landingPage();
-  if (method === 'GET' && path === '/shelf') return await shelfPage(url, env);
+  if (method === 'GET' && path === '/') return landingPage(langForRequest(request, url));
+  if (method === 'GET' && path === '/shelf') return await shelfPage(url, env, langForRequest(request, url));
   if (method === 'GET' && path === '/rules') return rulesPage();
   if (method === 'GET' && path === '/admin') return adminPage();
 
-  return notFoundPage();
+  return notFoundPage(langForRequest(request, url));
 }
 
 /**

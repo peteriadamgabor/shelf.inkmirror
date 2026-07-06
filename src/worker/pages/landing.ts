@@ -6,7 +6,8 @@
  * readers still see a mirror, never upright ghost text.
  */
 
-import { htmlResponse, pageShell } from '../../html';
+import { escapeHtml, htmlResponse, pageShell } from '../../html';
+import { t, type Lang } from '../i18n';
 
 /** Permanent demo work (expiry pinned to 2099; manage link held locally). */
 const DEMO_WORK_URL = '/w/wLBzGbzG8TQNhyXftFOz5g';
@@ -38,10 +39,22 @@ const LANDING_CSS = `
 .fine a{color:inherit}
 `;
 
-export function landingPage(): Response {
+export function landingPage(lang: Lang = 'en'): Response {
+  const brand = escapeHtml(t(lang, 'brand'));
+  // The tagline/fine strings carry a {token} where a link belongs — the
+  // templates are our own trusted strings, so the anchor goes in raw.
+  const tagline = t(lang, 'landing.tagline').replace(
+    '{ink}',
+    '<a href="https://inkmirror.cc" rel="noopener">InkMirror</a>',
+  );
+  const fine = t(lang, 'landing.fine').replace(
+    '{rules}',
+    `<a href="/rules">${escapeHtml(t(lang, 'houseRules'))}</a>`,
+  );
   return htmlResponse(
     pageShell({
-      title: 'The Shelf — the reading room next door to InkMirror',
+      title: t(lang, 'landing.docTitle'),
+      lang,
       css: LANDING_CSS,
       body: `<div class="hero">
 <div class="hero-inner">
@@ -50,21 +63,18 @@ export function landingPage(): Response {
 <div class="heart heart-ember"><div class="heart-core"></div></div>
 </div>
 <div class="wordmark">
-<h1>The Shelf</h1>
+<h1>${brand}</h1>
 <div class="mirror-line" aria-hidden="true"></div>
-<div class="reflection" aria-hidden="true">The Shelf</div>
+<div class="reflection" aria-hidden="true">${brand}</div>
 </div>
-<p class="tagline">The reading room next door to <a href="https://inkmirror.cc" rel="noopener">InkMirror</a>.</p>
-<p class="sub">Writers publish a draft or a finished work by explicit choice and share it by
-unlisted link — no accounts, no feeds, no algorithm. Works are labeled honestly,
-read quietly, and expire after 30 days unless their author renews them. Listing on
-the public shelf is a second explicit choice, and the one moment a work is moderated.</p>
+<p class="tagline">${tagline}</p>
+<p class="sub">${escapeHtml(t(lang, 'landing.sub'))}</p>
 <div class="ctas">
-<a class="cta-primary" href="https://inkmirror.cc" rel="noopener">Write with InkMirror</a>
-<a class="cta-quiet" href="${DEMO_WORK_URL}">Read a sample — Rothschild&#39;s Fiddle</a>
-<a class="cta-quiet" href="/shelf">Browse the Shelf</a>
+<a class="cta-primary" href="https://inkmirror.cc" rel="noopener">${escapeHtml(t(lang, 'landing.ctaWrite'))}</a>
+<a class="cta-quiet" href="${DEMO_WORK_URL}">${t(lang, 'landing.ctaSample')}</a>
+<a class="cta-quiet" href="/shelf">${escapeHtml(t(lang, 'landing.ctaBrowse'))}</a>
 </div>
-<p class="fine">No accounts. No tracking. <a href="/rules">House rules</a> apply to every shared work.</p>
+<p class="fine">${fine}</p>
 </div>
 </div>`,
     }),
