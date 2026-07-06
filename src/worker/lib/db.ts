@@ -28,6 +28,15 @@ export interface WorkRow {
   /** Compact JSON verdict from the Phase 2 shadow chain; NULL = not run. */
   moderation_verdict: string | null;
   moderation_at: string | null;
+  /**
+   * Phase 3 listing lifecycle: NULL (never requested) | 'pending' | 'listed'
+   * | 'refused' | 'held'. Invariant: listed = 1 iff listing_state = 'listed'.
+   */
+  listing_state: string | null;
+  /** When the work went onto the shelf; /shelf sorts by it (recency only). */
+  listed_at: string | null;
+  /** Author-facing gate outcome JSON (see parseListingVerdict). */
+  listing_verdict: string | null;
 }
 
 export interface NewWork {
@@ -129,6 +138,123 @@ export async function setModerationVerdict(
     .prepare('UPDATE works SET moderation_verdict = ?1, moderation_at = ?2 WHERE id = ?3')
     .bind(verdictJson, atIso, id)
     .run();
+}
+
+// ---------- listing lifecycle (Phase 3) ----------
+
+/** Author asked for a listing; the gate (or the operator) will resolve it. */
+export async function markListingPending(db: D1Database, id: string): Promise<void> {
+  await db
+    .prepare(
+      "UPDATE works SET listing_state = 'pending', listed = 0, listed_at = NULL, listing_verdict = NULL WHERE id = ?1",
+    )
+    .bind(id)
+    .run();
+}
+
+/**
+ * Gate outcome. The WHERE guard makes the write land ONLY while the request
+ * is still pending — an author who delists (or unpublishes) mid-run must not
+ * be listed against their will by a slow chain. The caller re-reads the row
+ * before any Discord ping so a skipped write also skips the noise.
+ */
+export async function resolveListingPending(
+  db: D1Database,
+  id: string,
+  state: 'listed' | 'refused' | 'held',
+  listedAt: string | null,
+  verdictJson: string | null,
+): Promise<void> {
+  await db
+    .prepare(
+      "UPDATE works SET listing_state = ?1, listed = ?2, listed_at = ?3, listing_verdict = ?4 WHERE id = ?5 AND listing_state = 'pending'",
+    )
+    .bind(state, state === 'listed' ? 1 : 0, listedAt, verdictJson, id)
+    .run();
+}
+
+/** Operator approve/deny — unconditional (the route checked the state). */
+export async function setListingResolved(
+  db: D1Database,
+  id: string,
+  state: 'listed' | 'refused' | 'held',
+  listedAt: string | null,
+  verdictJson: string | null,
+): Promise<void> {
+  await db
+    .prepare('UPDATE works SET listing_state = ?1, listed = ?2, listed_at = ?3, listing_verdict = ?4 WHERE id = ?5')
+    .bind(state, state === 'listed' ? 1 : 0, listedAt, verdictJson, id)
+    .run();
+}
+
+/** Back to never-requested. Always allowed; also used by operator removal. */
+export async function delistWork(db: D1Database, id: string): Promise<void> {
+  await db
+    .prepare('UPDATE works SET listing_state = NULL, listed = 0, listed_at = NULL, listing_verdict = NULL WHERE id = ?1')
+    .bind(id)
+    .run();
+}
+
+// ---------- the shelf browse query (Phase 3) ----------
+
+export interface ShelfFilters {
+  rating: string | null;
+  language: string | null;
+}
+
+/** One /shelf card. `warnings` stays JSON-encoded like the row. */
+export interface ShelfCard {
+  id: string;
+  title: string;
+  pen_name: string;
+  language: string;
+  rating: string;
+  warnings: string;
+  word_count: number;
+  first_line: string;
+  listed_at: string | null;
+}
+
+function shelfWhere(f: ShelfFilters): { clause: string; args: unknown[] } {
+  const where = ['listed = 1', "status = 'active'"];
+  const args: unknown[] = [];
+  if (f.rating !== null) {
+    args.push(f.rating);
+    where.push(`rating = ?${args.length}`);
+  }
+  if (f.language !== null) {
+    args.push(f.language);
+    where.push(`language = ?${args.length}`);
+  }
+  return { clause: where.join(' AND '), args };
+}
+
+/** Newest listing first — recency and filters only, never popularity. */
+export async function listShelfWorks(
+  db: D1Database,
+  f: ShelfFilters,
+  limit: number,
+  offset: number,
+): Promise<ShelfCard[]> {
+  const { clause, args } = shelfWhere(f);
+  const { results } = await db
+    .prepare(
+      `SELECT id, title, pen_name, language, rating, warnings, word_count, first_line, listed_at
+       FROM works WHERE ${clause}
+       ORDER BY listed_at DESC, id DESC LIMIT ?${args.length + 1} OFFSET ?${args.length + 2}`,
+    )
+    .bind(...args, limit, offset)
+    .all<ShelfCard>();
+  return results;
+}
+
+export async function countShelfWorks(db: D1Database, f: ShelfFilters): Promise<number> {
+  const { clause, args } = shelfWhere(f);
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM works WHERE ${clause}`)
+    .bind(...args)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
 }
 
 export async function incrementViews(db: D1Database, id: string): Promise<void> {
@@ -248,8 +374,21 @@ export interface AdminWorkSummary {
   password_protected: number;
   /** 'pass' | 'tag-fix' | 'hold' | 'error' — NULL when the chain hasn't run. */
   moderation_outcome: string | null;
+  /** 'pending' | 'listed' | 'refused' | 'held' — NULL when never requested. */
+  listing_state: string | null;
   created_at: string;
   expires_at: string;
+}
+
+/** A held listing request awaiting the operator's approve/deny. */
+export interface HeldListing {
+  id: string;
+  title: string;
+  pen_name: string;
+  rating: string;
+  /** Raw JSON — the route parses it before it leaves. */
+  listing_verdict: string | null;
+  updated_at: string;
 }
 
 export interface ReportRow {
@@ -310,7 +449,7 @@ export async function listRecentWorks(db: D1Database, limit: number): Promise<Ad
     .prepare(
       `SELECT id, title, pen_name, rating, word_count, views, report_count,
               status, (password_hash IS NOT NULL) AS password_protected,
-              moderation_verdict, created_at, expires_at
+              moderation_verdict, listing_state, created_at, expires_at
        FROM works ORDER BY created_at DESC LIMIT ?1`,
     )
     .bind(limit)
@@ -321,9 +460,26 @@ export async function listRecentWorks(db: D1Database, limit: number): Promise<Ad
   }));
 }
 
+/** Held listing requests, oldest decision first (the operator's queue). */
+export async function listHeldListings(db: D1Database, limit: number): Promise<HeldListing[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT id, title, pen_name, rating, listing_verdict, updated_at
+       FROM works WHERE listing_state = 'held' ORDER BY updated_at ASC LIMIT ?1`,
+    )
+    .bind(limit)
+    .all<HeldListing>();
+  return results;
+}
+
+/** Operator removal also delists — a removed work must never sit on /shelf. */
 export async function removeWork(db: D1Database, id: string, removedAt: string): Promise<void> {
   await db
-    .prepare("UPDATE works SET status = 'removed', removed_at = ?1 WHERE id = ?2")
+    .prepare(
+      `UPDATE works SET status = 'removed', removed_at = ?1,
+         listing_state = NULL, listed = 0, listed_at = NULL, listing_verdict = NULL
+       WHERE id = ?2`,
+    )
     .bind(removedAt, id)
     .run();
 }
