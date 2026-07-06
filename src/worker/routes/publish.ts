@@ -15,6 +15,7 @@ import { contentHash } from '../lib/content-hash';
 import { bakeWork } from '../lib/bake';
 import { getSetting, hasTombstone, insertWork } from '../lib/db';
 import { scheduleModeration } from '../lib/moderation';
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, hashPassword } from '../lib/password';
 import { MAX_PUBLISH_BODY_BYTES, clientIp, jsonError, readBodyCapped } from '../lib/http';
 
 export const WORK_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -78,6 +79,25 @@ export async function handlePublish(
     return jsonError(400, 'invalid_bundle', e instanceof Error ? e.message : 'validation failed');
   }
 
+  // Optional publish-time password: an author can lock a work from the first
+  // byte (private beta-reader drafts), rather than publishing unprotected and
+  // locking afterward. It rides as a top-level request field, extracted here
+  // and NOT part of the bundle — sanitizePublishBundle already dropped it, so
+  // it never reaches R2. A locked work is private: it skips the moderation
+  // chain entirely (see below) and cannot be listed.
+  const rawPassword = (parsed as unknown as Record<string, unknown>)['password'];
+  let passwordHash: string | null = null;
+  if (rawPassword !== undefined && rawPassword !== null) {
+    if (
+      typeof rawPassword !== 'string' ||
+      rawPassword.length < MIN_PASSWORD_LENGTH ||
+      rawPassword.length > MAX_PASSWORD_LENGTH
+    ) {
+      return jsonError(400, 'invalid_password');
+    }
+    passwordHash = await hashPassword(rawPassword);
+  }
+
   // Computed once: the tombstone gate checks it, the row stores it (the
   // moderation chain's dedup key — see migrations/0006_budget.sql).
   const bundleHash = await contentHash(clean);
@@ -108,12 +128,17 @@ export async function handlePublish(
     created_at: nowIso,
     updated_at: nowIso,
     expires_at: expiresAt,
+    password_hash: passwordHash,
   });
 
   // Phase 2 shadow chain: content is already stored and baked — the chain
-  // only observes in the background. No-op without ANTHROPIC_API_KEY. A fresh
-  // publish is never password-locked (the password is set later via manage).
-  scheduleModeration(ctx, env, clean, id, false);
+  // only observes in the background. No-op without ANTHROPIC_API_KEY. A
+  // publish-time password makes the work private, so the chain is skipped
+  // (a locked draft is never sent to the model).
+  scheduleModeration(ctx, env, clean, id, passwordHash !== null);
 
-  return Response.json({ id, url: workUrl(id), manageSecret }, { status: 200 });
+  return Response.json(
+    { id, url: workUrl(id), manageSecret, passwordProtected: passwordHash !== null },
+    { status: 200 },
+  );
 }

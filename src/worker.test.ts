@@ -157,7 +157,7 @@ class FakeStatement {
     const s = this.sql;
     const a = this.args;
     if (s.includes('INSERT INTO works')) {
-      const [id, secret_hash, title, pen_name, language, rating, warnings, word_count, first_line, content_hash, created_at, updated_at, expires_at] = a;
+      const [id, secret_hash, title, pen_name, language, rating, warnings, word_count, first_line, content_hash, created_at, updated_at, expires_at, password_hash] = a;
       this.works.set(String(id), {
         id: String(id),
         secret_hash: String(secret_hash),
@@ -171,7 +171,7 @@ class FakeStatement {
         content_hash: String(content_hash),
         status: 'active',
         listed: 0,
-        password_hash: null,
+        password_hash: password_hash === undefined || password_hash === null ? null : String(password_hash),
         views: 0,
         letters_open: 1,
         report_count: 0,
@@ -3412,6 +3412,49 @@ describe('hardening — a public listing binds to the reviewed artifact', () => 
     expect(after?.listing_state).toBe('held');
     expect(after?.listed).toBe(0);
     expect(JSON.parse(after?.listing_verdict ?? '{}')['reason']).toBe('truncated');
+  });
+
+  it('publish-time password: the work is born locked, gated, and never scanned', async () => {
+    const h = makeEnv({ ANTHROPIC_API_KEY: 'sk-test' });
+    const { calls } = stubModerationFetch({});
+    const bundle = makeModeratedBundle();
+    const res = await dispatch(
+      h,
+      new Request(`${BASE}/api/publish`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...bundle, password: 'beta readers only' }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body['passwordProtected']).toBe(true);
+
+    const id = String(body['id']);
+    expect(h.d1.works.get(id)?.password_hash).toMatch(/^pbkdf2\$/);
+    // Locked from byte one → the shadow chain must not have run.
+    expect(anthropicCalls(calls).length).toBe(0);
+    // The stored bundle must NOT carry the password (sanitizer dropped it).
+    const stored = JSON.parse((h.r2.store.get(`works/${id}/bundle.json`) as string) ?? '{}');
+    expect('password' in stored).toBe(false);
+    // The reading page serves the unlock gate, not the prose.
+    const page = await dispatch(h, new Request(`${BASE}/w/${id}`));
+    expect(await page.text()).toContain('Unlock');
+  });
+
+  it('publish-time password rejects an out-of-range value (400)', async () => {
+    const h = makeEnv();
+    const bundle = makeModeratedBundle();
+    const res = await dispatch(
+      h,
+      new Request(`${BASE}/api/publish`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...bundle, password: 'xx' }), // too short
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as Record<string, unknown>)['error']).toBe('invalid_password');
   });
 
   it('HIGH 6: a password-locked work is never sent to the moderation API', async () => {

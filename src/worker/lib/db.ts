@@ -68,6 +68,8 @@ export interface NewWork {
   created_at: string;
   updated_at: string;
   expires_at: string;
+  /** PBKDF2 hash when the work is published already-locked; else NULL. */
+  password_hash?: string | null;
 }
 
 export interface WorkUpdate {
@@ -100,8 +102,8 @@ export async function insertWork(db: D1Database, w: NewWork): Promise<void> {
     .prepare(
       `INSERT INTO works
         (id, secret_hash, title, pen_name, language, rating, warnings,
-         word_count, first_line, content_hash, created_at, updated_at, expires_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`,
+         word_count, first_line, content_hash, created_at, updated_at, expires_at, password_hash)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
     )
     .bind(
       w.id,
@@ -117,6 +119,7 @@ export async function insertWork(db: D1Database, w: NewWork): Promise<void> {
       w.created_at,
       w.updated_at,
       w.expires_at,
+      w.password_hash ?? null,
     )
     .run();
 }
