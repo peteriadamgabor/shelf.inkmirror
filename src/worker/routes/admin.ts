@@ -12,6 +12,8 @@
  *   POST   /api/admin/works/:id/expiry    set expires_at = now + days
  *   POST   /api/admin/pause               panic switch (settings.publishing_paused)
  *   DELETE /api/admin/tombstones/:hash    forgive a tombstone
+ *   GET    /api/admin/backup              download the full D1 dump as JSON
+ *   POST   /api/admin/restore-db          non-destructive restore from a dump
  */
 
 import { isPublishBundle, type PublishBundleV1 } from '../../format';
@@ -41,6 +43,7 @@ import {
 import { chainDailyCap, chainRunsKey, parseModerationVerdict } from '../lib/moderation';
 import { parseListingVerdict } from '../lib/listing';
 import { parseLabels, relabelAndRebake } from '../lib/relabel';
+import { dumpDatabase, restoreDatabase } from '../lib/backup';
 import { WORK_ID_RE, clientIp, jsonError, readBodyCapped } from '../lib/http';
 import { PAUSED_KEY } from './publish';
 import { notFoundPage } from './read';
@@ -61,6 +64,8 @@ export async function handleAdmin(request: Request, env: Env, path: string, meth
 
   if (path === '/api/admin/overview' && method === 'GET') return await overview(env);
   if (path === '/api/admin/pause' && method === 'POST') return await pause(request, env);
+  if (path === '/api/admin/backup' && method === 'GET') return await downloadBackup(env);
+  if (path === '/api/admin/restore-db' && method === 'POST') return await importDatabase(request, env);
 
   const workMatch = path.match(/^\/api\/admin\/works\/([^/]{1,64})(?:\/(remove|restore|relabel|listing|expiry))?$/);
   if (workMatch) {
@@ -119,6 +124,40 @@ async function loadBundle(env: Env, id: string): Promise<PublishBundleV1 | null>
 }
 
 // ---------- routes ----------
+
+/** GET /api/admin/backup — the full D1 dump as a downloadable JSON file. */
+async function downloadBackup(env: Env): Promise<Response> {
+  const dump = await dumpDatabase(env.SHELF_DB, new Date().toISOString());
+  return new Response(JSON.stringify(dump), {
+    status: 200,
+    headers: {
+      'content-type': 'application/json',
+      'content-disposition': `attachment; filename="shelf-backup-${dump.exported_at.slice(0, 10)}.json"`,
+    },
+  });
+}
+
+/**
+ * POST /api/admin/restore-db — non-destructive restore from a posted dump.
+ * INSERT OR IGNORE only, so it can add missing rows but never overwrite or
+ * delete. Returns per-table counts.
+ */
+async function importDatabase(request: Request, env: Env): Promise<Response> {
+  const text = await readBodyCapped(request, 64 * 1024 * 1024); // dumps can be large
+  if (text === null) return jsonError(413, 'too_large');
+  let dump: unknown;
+  try {
+    dump = JSON.parse(text);
+  } catch {
+    return jsonError(400, 'invalid_json');
+  }
+  try {
+    const counts = await restoreDatabase(env.SHELF_DB, dump);
+    return Response.json({ ok: true, restored: counts });
+  } catch (e) {
+    return jsonError(400, 'invalid_dump', e instanceof Error ? e.message : 'restore failed');
+  }
+}
 
 async function overview(env: Env): Promise<Response> {
   const db = env.SHELF_DB;

@@ -76,13 +76,15 @@ class FakeD1 {
   settings = new Map<string, string>();
   /** Insertion order = rowid order (oldest first), like the real table. */
   letters: FakeLetter[] = [];
-  prepare(sql: string): { bind(...args: unknown[]): FakeStatement } {
-    const db = this;
-    return {
-      bind(...args: unknown[]): FakeStatement {
-        return new FakeStatement(sql, args, db);
-      },
-    };
+  prepare(sql: string): FakeStatement {
+    // Real D1 statements support .bind() AND direct .all()/.first()/.run()
+    // (for param-less queries). Return a bindable statement with empty args.
+    return new FakeStatement(sql, [], this);
+  }
+  async batch(stmts: FakeStatement[]): Promise<unknown[]> {
+    const out: unknown[] = [];
+    for (const s of stmts) out.push(await s.run());
+    return out;
   }
 }
 
@@ -92,6 +94,10 @@ class FakeStatement {
     private args: unknown[],
     private db: FakeD1,
   ) {}
+
+  bind(...args: unknown[]): FakeStatement {
+    return new FakeStatement(this.sql, args, this.db);
+  }
 
   private get works(): Map<string, WorkRow> {
     return this.db.works;
@@ -156,6 +162,28 @@ class FakeStatement {
   async run(): Promise<{ success: boolean }> {
     const s = this.sql;
     const a = this.args;
+    // Generic non-destructive restore: INSERT OR IGNORE INTO <table> (cols) …
+    const ins = s.match(/INSERT OR IGNORE INTO (\w+) \(([^)]+)\)/);
+    if (ins) {
+      const table = ins[1] as string;
+      const cols = (ins[2] as string).split(',').map((c) => c.trim());
+      const row: Record<string, unknown> = {};
+      cols.forEach((c, i) => (row[c] = a[i]));
+      if (table === 'works') {
+        if (!this.works.has(String(row['id']))) this.works.set(String(row['id']), row as unknown as WorkRow);
+      } else if (table === 'reports') {
+        if (!this.db.reports.some((r) => r.id === row['id'])) this.db.reports.push(row as unknown as FakeReport);
+      } else if (table === 'letters') {
+        if (!this.db.letters.some((l) => l.id === row['id'])) this.db.letters.push(row as unknown as FakeLetter);
+      } else if (table === 'tombstones') {
+        if (!this.db.tombstones.has(String(row['content_hash']))) {
+          this.db.tombstones.set(String(row['content_hash']), row as unknown as FakeTombstone);
+        }
+      } else if (table === 'settings') {
+        if (!this.db.settings.has(String(row['key']))) this.db.settings.set(String(row['key']), String(row['value']));
+      }
+      return { success: true };
+    }
     if (s.includes('INSERT INTO works')) {
       const [id, secret_hash, title, pen_name, language, rating, warnings, word_count, first_line, content_hash, created_at, updated_at, expires_at, password_hash] = a;
       this.works.set(String(id), {
@@ -496,6 +524,17 @@ class FakeStatement {
       const limit = Number(this.args[0]);
       const results = [...this.db.tombstones.values()].slice(0, limit).map((t) => ({ ...t }) as T);
       return { results };
+    }
+    if (/SELECT \* FROM (works|reports|letters|tombstones|settings) LIMIT/.test(s)) {
+      // dumpTable — full-table read for backup.
+      const table = (s.match(/FROM (\w+) LIMIT/) as RegExpMatchArray)[1];
+      let rows: unknown[] = [];
+      if (table === 'works') rows = [...this.works.values()];
+      else if (table === 'reports') rows = [...this.db.reports];
+      else if (table === 'letters') rows = [...this.db.letters];
+      else if (table === 'tombstones') rows = [...this.db.tombstones.values()];
+      else if (table === 'settings') rows = [...this.db.settings.entries()].map(([key, value]) => ({ key, value }));
+      return { results: rows as T[] };
     }
     if (s.includes('listed = 1 AND (listing_state')) {
       // listInvariantViolations — the daily integrity canary.
@@ -1103,7 +1142,8 @@ describe('chaptered reading — bake + /w/:id/:n', () => {
     await worker.scheduled({} as ScheduledController, h.env, ctx);
     await drain();
 
-    expect(h.r2.store.size).toBe(0);
+    // The work's objects are gone (a backups/ file may remain from the cron).
+    expect([...h.r2.store.keys()].some((k) => k.startsWith(`works/${id}/`))).toBe(false);
     expect(h.d1.works.has(id)).toBe(false);
   });
 });
@@ -3525,5 +3565,71 @@ describe('server-side crash reporting (GlitchTip)', () => {
     const { reportException } = await import('./worker/lib/glitchtip');
     const env = { GLITCHTIP_DSN: DSN } as unknown as import('./worker/lib/env').Env;
     await expect(reportException(env, new Error('y'), new Request(`${BASE}/`))).resolves.toBeUndefined();
+  });
+});
+
+describe('database backup / restore', () => {
+  it('dump → restore round-trips the works, reports, and settings', async () => {
+    const { dumpDatabase, restoreDatabase } = await import('./worker/lib/backup');
+    const h = makeEnv();
+    const { id } = await publish(h, makeBundle({ title: 'Kept Safe' }));
+    h.d1.settings.set('some_flag', '1');
+
+    const dump = await dumpDatabase(h.d1 as unknown as D1Database, '2026-07-06T00:00:00.000Z');
+    expect(dump.works).toHaveLength(1);
+    expect(dump.works[0]?.['title']).toBe('Kept Safe');
+    // Simulate catastrophic D1 loss.
+    h.d1.works.clear();
+    h.d1.settings.clear();
+    expect(h.d1.works.size).toBe(0);
+
+    const counts = await restoreDatabase(h.d1 as unknown as D1Database, dump);
+    expect(counts['works']).toBe(1);
+    expect(h.d1.works.get(id)?.title).toBe('Kept Safe');
+    expect(h.d1.works.get(id)?.secret_hash).toBeTruthy(); // the ownership proof survived
+    expect(h.d1.settings.get('some_flag')).toBe('1');
+  });
+
+  it('restore is non-destructive — it never overwrites a live row', async () => {
+    const { dumpDatabase, restoreDatabase } = await import('./worker/lib/backup');
+    const h = makeEnv();
+    const { id } = await publish(h, makeBundle({ title: 'Original' }));
+    const dump = await dumpDatabase(h.d1 as unknown as D1Database, '2026-07-06T00:00:00.000Z');
+
+    // The live row moved on since the dump.
+    h.d1.works.get(id)!.title = 'Newer Title';
+    await restoreDatabase(h.d1 as unknown as D1Database, dump);
+    // INSERT OR IGNORE left the newer row untouched.
+    expect(h.d1.works.get(id)?.title).toBe('Newer Title');
+  });
+
+  it('the daily cron writes a dated backup into R2', async () => {
+    const h = makeEnv();
+    await publish(h, makeBundle());
+    const { ctx, drain } = makeCtx();
+    await worker.scheduled({} as ScheduledController, h.env, ctx);
+    await drain();
+    const backups = [...h.r2.store.keys()].filter((k) => k.startsWith('backups/'));
+    expect(backups).toHaveLength(1);
+    expect(backups[0]).toMatch(/^backups\/\d{4}-\d{2}-\d{2}\.json$/);
+    const dump = JSON.parse(h.r2.store.get(backups[0]!) as string);
+    expect(dump.version).toBe(1);
+    expect(Array.isArray(dump.works)).toBe(true);
+  });
+
+  it('admin can download a backup; a bad restore payload is rejected', async () => {
+    const h = makeEnv({ ADMIN_SECRET });
+    await publish(h, makeBundle());
+    const dl = await adminGet(h, '/api/admin/backup');
+    expect(dl.status).toBe(200);
+    expect(dl.headers.get('content-disposition')).toContain('attachment');
+    const dump = (await dl.json()) as Record<string, unknown>;
+    expect(dump['version']).toBe(1);
+
+    const bad = await adminPost(h, '/api/admin/restore-db', { version: 999 });
+    expect(bad.status).toBe(400);
+
+    const secretless = await dispatch(h, new Request(`${BASE}/api/admin/backup`));
+    expect(secretless.status).toBe(404); // no oracle without the admin secret
   });
 });

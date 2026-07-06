@@ -35,6 +35,7 @@ import type { Env } from './worker/lib/env';
 import { WORK_ID_RE, preflightResponse, withCors } from './worker/lib/http';
 import { deleteWorkObjects, listWorkIds } from './worker/lib/bake';
 import { reportException } from './worker/lib/glitchtip';
+import { runBackup } from './worker/lib/backup';
 import { deleteWork, listExpired, listInvariantViolations, listRemovedBefore, workExists } from './worker/lib/db';
 import { handlePublish } from './worker/routes/publish';
 import { handleManage } from './worker/routes/manage';
@@ -287,6 +288,7 @@ async function checkInvariants(env: Env): Promise<void> {
 }
 
 async function dailyMaintenance(env: Env): Promise<void> {
+  await runBackup(env, Date.now());
   await purgeExpired(env);
   await sweepOrphans(env);
   await checkInvariants(env);
