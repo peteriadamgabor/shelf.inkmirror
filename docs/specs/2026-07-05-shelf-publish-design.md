@@ -161,7 +161,8 @@ CREATE TABLE works (
 );
 ```
 
-Phase 2 adds `moderation_verdict` / `moderation_at` columns.
+Phase 2 added `moderation_verdict` / `moderation_at` columns
+(`migrations/0004_moderation.sql`) — see "Moderation chain" below.
 
 ### Visibility tiers (per-work, chosen in the publish modal)
 
@@ -357,29 +358,65 @@ Lives at `shelf.inkmirror.cc/rules`, exists before the first explicit work.
 - **The bannable offense for everything else is mislabeling**, judged as a
   yes/no ("does the work contain what the tags say?"), not literary merit.
 
-## Moderation chain (Phase 2)
+## Moderation chain (Phase 2) — SHIPPED, shadow mode
 
-Runs **in the shelf Worker** (client-side previews are courtesy only — the
-Worker's verdict is the real one).
+Runs **in the shelf Worker** (`src/worker/lib/moderation.ts`; client-side
+previews are courtesy only — the Worker's verdict is the real one). Shipped
+in **shadow mode**: the chain runs in the background (`ctx.waitUntil`) AFTER
+a successful publish or update — content is already stored and baked, the
+HTTP response already decided — and it never blocks anything. Unset
+`ANTHROPIC_API_KEY` = complete no-op. **Flipping shadow → gate is Phase 3's
+job** (the shelf listing is the moderation gate, per D6).
 
-1. **Router pass** — blocks chunked (~2k tokens), Claude Haiku with a tight
-   rubric flags chunks per category, plus a random sample of unflagged chunks
-   (plain-language evasion catch).
-2. **Verifier pass** — model reads flagged chunks in context and answers only:
-   (a) hard line crossed? (b) declared rating/warnings honest?
-3. **Outcomes:**
-   - `pass` — publish proceeds.
-   - `tag-fix` — author gets a block-anchored report (heatmap-style, the
-     scan-visual language of the editor) with suggested rating/tags;
-     one-click accept & republish.
-   - `hold` — hard-line suspicion → Discord ping with excerpt + work id;
-     human decides. Never auto-reject, never auto-publish.
-4. **Rollout:** built in Phase 2 but wired as shadow-mode on link publishes
-   (verdict logged to Discord, never blocks) → real false-positive rate on
-   real fiction before the shelf makes it a gate.
+1. **Chunking** — block contents concatenated in reading order (chapter
+   order, block order — same ordering as the tombstone content hash) into
+   ~6,000-char chunks with block-id boundaries preserved (each chunk knows
+   which block ids it covers; an oversized block is sliced, every slice
+   keeping its id). Hard cap **30 chunks per work**: larger works keep the
+   first 20 plus a sample of 10 from the rest drawn by a PRNG **seeded by
+   the work id** (deterministic per work), and the verdict records
+   `truncated: true`.
+2. **Router pass** — `claude-haiku-4-5` (the current small/fast tier),
+   batches of up to 8 chunks per call, forced tool use so the reply is
+   strict JSON `{chunk, flags[]}`. Categories: minors ·
+   real-person-harassment · sexual-explicit · graphic-violence · self-harm.
+   The rubric states explicitly that fiction is expected and dark themes are
+   not flags — it routes for review, it does not judge.
+3. **Verifier pass** — `claude-sonnet-5` (stronger tier), **one** call, only
+   when a hard-line category was flagged or the aggregate content flags
+   aren't covered by the declared rating/warnings. Gets the flagged chunk
+   texts plus the declared labels; answers exactly two questions via forced
+   tool use: (a) `hardLine: none | minors | real-person-harassment` with a
+   quote-grounded one-sentence reason, (b) `labels: honest | under-labeled`
+   with suggested `{rating, warnings}`. Instructed never to judge literary
+   merit or themes.
+4. **Verdict** — compact JSON in `works.moderation_verdict` (+
+   `moderation_at`):
+   `{ outcome: 'pass'|'tag-fix'|'hold'|'error', truncated, flaggedChunks,
+   suggested?, reason?, model, ms }`. `hold` ⇔ hardLine ≠ none; `tag-fix` ⇔
+   under-labeled. The write is a plain UPDATE — a work unpublished mid-run
+   matches zero rows, silently. Never auto-reject, never auto-publish: a
+   hold is a Discord ping for a human, nothing else.
+5. **Shadow reporting** — outcomes ≠ `pass` post a compact Discord embed
+   (work id, title, outcome, reason/suggestion, explicit "SHADOW MODE —
+   nothing was blocked" footer). Pass outcomes live in D1 only, no noise.
+   The admin overview/detail and console surface the verdict per work
+   (hold = ember, tag-fix = amber, pass = muted, error = muted italic).
+6. **Failure posture** — any API error, overall ~60s timeout (AbortSignal),
+   or parse failure collapses into an `{outcome:'error', reason}` verdict;
+   nothing ever rejects out of the `waitUntil`, and the publish response is
+   never affected (it already returned).
+7. **Budget guards** — no key = no-op; works under 200 chars skipped; small
+   `max_tokens` on router calls; one run per publish/update, no retries.
+   The publish rate limit remains the outer API-budget guard.
 
-Cost: Haiku-class routing + verification ≈ low single-digit cents per novel.
-The publish rate limit is also the API-budget guard.
+Still Phase 3 (with the gate): the author-facing block-anchored `tag-fix`
+report with one-click accept & republish — in shadow mode the suggestion is
+operator-visible only.
+
+Cost: Haiku-class routing + one Sonnet verification on the rare flagged work
+≈ low single-digit cents per novel. The publish rate limit is also the
+API-budget guard.
 
 ## Phase 1.5 — operator toolkit (shipped)
 
