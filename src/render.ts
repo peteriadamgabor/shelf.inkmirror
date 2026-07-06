@@ -25,6 +25,7 @@ import type {
   WarningTag,
 } from './format';
 import { escapeHtml, FAVICON_DATA_URI, THEME_CSS } from './html';
+import { langForWork, t, type Lang } from './worker/i18n';
 
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$/;
 
@@ -36,15 +37,8 @@ const POV_ACCENT = 'var(--violet)';
 const FRONT_MATTER = new Set<string>(['cover', 'dedication', 'epigraph']);
 const BACK_MATTER = new Set<string>(['acknowledgments', 'afterword']);
 
-const WARNING_LABELS: Record<WarningTag, string> = {
-  'graphic-violence': 'Graphic violence',
-  'sexual-content': 'Sexual content',
-  'sexual-violence': 'Sexual violence',
-  'self-harm': 'Self-harm / suicide',
-  'child-abuse-depiction': 'Child abuse (depiction)',
-  'substance-abuse': 'Substance abuse',
-  'other': 'Other',
-};
+// Warning + rating labels now live in the i18n dictionary (worker/i18n.ts),
+// keyed by the work's language so a Hungarian novel gets Hungarian chrome.
 
 // ---------- derived metadata (shared with the publish route) ----------
 
@@ -197,40 +191,40 @@ function renderScene(b: PublishedBlock): string {
 
 // ---------- chrome pieces ----------
 
-function ratingBadge(rating: Rating): string {
-  return `<span class="badge badge-${rating}">${rating}</span>`;
+function ratingBadge(rating: Rating, lang: Lang): string {
+  return `<span class="badge badge-${rating}">${escapeHtml(t(lang, 'rating.' + rating))}</span>`;
 }
 
-function warningChips(warnings: WarningTag[]): string {
+function warningChips(warnings: WarningTag[], lang: Lang): string {
   return warnings
-    .map((w) => `<span class="chip">${escapeHtml(WARNING_LABELS[w] ?? w)}</span>`)
+    .map((w) => `<span class="chip">${escapeHtml(t(lang, 'warning.' + w))}</span>`)
     .join('');
 }
 
-function reportLink(workId: string): string {
+function reportLink(workId: string, lang: Lang): string {
   // The form itself lives on the live Worker page /w/:id/report so it can
   // evolve (fields, optional Turnstile) without re-baking published pages.
-  return `<a href="/w/${escapeHtml(workId)}/report" rel="nofollow">Report this work</a>`;
+  return `<a href="/w/${escapeHtml(workId)}/report" rel="nofollow">${escapeHtml(t(lang, 'read.foot.report'))}</a>`;
 }
 
-function letterLink(workId: string): string {
+function letterLink(workId: string, lang: Lang): string {
   // Live page, same pattern as the report link. Always baked in: bake time
   // cannot know the future letters_open state, so the link is permanent and
   // the live page simply 404s while the author's mailbox is closed.
-  return `<a href="/w/${escapeHtml(workId)}/letter" rel="nofollow">Write to the author</a>`;
+  return `<a href="/w/${escapeHtml(workId)}/letter" rel="nofollow">${escapeHtml(t(lang, 'read.foot.letter'))}</a>`;
 }
 
-function ageGate(bundle: PublishBundleV1): string {
+function ageGate(bundle: PublishBundleV1, lang: Lang): string {
   return `<div id="age-gate" class="gate">
 <div class="gate-card">
-<p class="gate-kicker">The Shelf</p>
+<p class="gate-kicker">${escapeHtml(t(lang, 'brand'))}</p>
 <h1 class="gate-title">${escapeHtml(bundle.title)}</h1>
-<p class="gate-by">by ${escapeHtml(bundle.pen_name)}</p>
-<div class="labels">${ratingBadge(bundle.rating)}${warningChips(bundle.warnings)}</div>
-<p class="gate-copy">This work is rated <strong>${bundle.rating}</strong> and is intended for adult readers.</p>
-<button id="age-yes" class="btn btn-primary" type="button">I&#39;m 18 or older — read</button>
-<p><a href="#" id="age-back">Take me back</a></p>
-<noscript><p class="gate-noscript">JavaScript is needed to confirm your age for this work. General-rated works on the Shelf read without it.</p></noscript>
+<p class="gate-by">${escapeHtml(bundle.pen_name)}</p>
+<div class="labels">${ratingBadge(bundle.rating, lang)}${warningChips(bundle.warnings, lang)}</div>
+<p class="gate-copy">${escapeHtml(t(lang, 'read.gate.ratedLine'))} <strong>${escapeHtml(t(lang, 'rating.' + bundle.rating))}</strong> ${escapeHtml(t(lang, 'read.gate.adultLine'))}</p>
+<button id="age-yes" class="btn btn-primary" type="button">${t(lang, 'read.gate.enter')}</button>
+<p><a href="#" id="age-back">${escapeHtml(t(lang, 'read.gate.back'))}</a></p>
+<noscript><p class="gate-noscript">${escapeHtml(t(lang, 'read.gate.noscript'))}</p></noscript>
 </div>
 </div>`;
 }
@@ -369,25 +363,25 @@ function chapterSection(ch: PublishedChapter, blocks: PublishedBlock[], ctx: Ren
   return `<section class="${classes}">${title}\n${body}</section>`;
 }
 
-function workHeader(bundle: PublishBundleV1): string {
+function workHeader(bundle: PublishBundleV1, lang: Lang): string {
   const synopsis = bundle.document.synopsis.trim().length > 0
     ? `<p class="synopsis">${escapeHtml(bundle.document.synopsis.trim())}</p>`
     : '';
   return `<header class="work-head">
 <h1 class="work-title">${escapeHtml(bundle.title)}</h1>
-<p class="byline">by ${escapeHtml(bundle.pen_name)}</p>
-<div class="labels">${ratingBadge(bundle.rating)}${warningChips(bundle.warnings)}</div>
+<p class="byline">${escapeHtml(bundle.pen_name)}</p>
+<div class="labels">${ratingBadge(bundle.rating, lang)}${warningChips(bundle.warnings, lang)}</div>
 ${synopsis}
 </header>`;
 }
 
-function workFooter(bundle: PublishBundleV1, meta: PageMeta): string {
+function workFooter(bundle: PublishBundleV1, meta: PageMeta, lang: Lang): string {
   // Closes like a book: centered colophon under an asterism, machinery
   // (report / attribution) whispered on one line.
   return `<footer class="work-foot">
 <div class="foot-mark" aria-hidden="true">&#8258;</div>
-<p class="foot-meta">${escapeHtml(bundle.pen_name)} &mdash; <span class="nums">${countWords(bundle).toLocaleString('en-US')}</span> words</p>
-<p class="foot-links">${letterLink(meta.id)}<span class="foot-dot" aria-hidden="true">&middot;</span>${reportLink(meta.id)}<span class="foot-dot" aria-hidden="true">&middot;</span><a href="https://inkmirror.cc" rel="noopener">Written with InkMirror</a></p>
+<p class="foot-meta">${escapeHtml(bundle.pen_name)} &mdash; <span class="nums">${countWords(bundle).toLocaleString('en-US')}</span> ${escapeHtml(t(lang, 'read.foot.words'))}</p>
+<p class="foot-links">${letterLink(meta.id, lang)}<span class="foot-dot" aria-hidden="true">&middot;</span>${reportLink(meta.id, lang)}<span class="foot-dot" aria-hidden="true">&middot;</span><a href="https://inkmirror.cc" rel="noopener">${escapeHtml(t(lang, 'read.foot.mark'))}</a></p>
 </footer>`;
 }
 
@@ -405,6 +399,7 @@ ${opts.body}
   const script = js.length > 0 ? `<script>${js}</script>\n` : '';
 
   const rtl = RTL_LANGUAGES.has(bundle.language.toLowerCase().split('-')[0] ?? '');
+  const lang = langForWork(bundle.language);
   return `<!doctype html>
 <html lang="${escapeHtml(bundle.language)}"${rtl ? ' dir="rtl"' : ''}>
 <head>
@@ -417,7 +412,7 @@ ${opts.body}
 <style>${THEME_CSS}${READING_CSS}</style>
 </head>
 <body>
-${gated ? ageGate(bundle) : ''}
+${gated ? ageGate(bundle, lang) : ''}
 ${main}
 ${script}</body>
 </html>`;
@@ -437,8 +432,10 @@ function chapterWordCount(blocks: PublishedBlock[]): number {
 }
 
 /** TOC / continue-slot label: the title, or "Chapter N" when hidden/empty. */
-function chapterLabel(ch: PublishedChapter, n: number): string {
-  return showsTitle(ch) && ch.title.trim().length > 0 ? ch.title.trim() : `Chapter ${n}`;
+function chapterLabel(ch: PublishedChapter, n: number, lang: Lang): string {
+  if (showsTitle(ch) && ch.title.trim().length > 0) return ch.title.trim();
+  // Hungarian orders the ordinal before the noun ("3. fejezet"); English after.
+  return lang === 'hu' ? `${n}. ${t(lang, 'read.chapterN')}` : `${t(lang, 'read.chapterN')} ${n}`;
 }
 
 /** Serialize a value into inline JS, safe against </script> breakout. */
@@ -454,6 +451,7 @@ function coverPage(
   labels: string[],
   ctx: RenderCtx,
   blocksByChapter: Map<string, PublishedBlock[]>,
+  lang: Lang,
 ): string {
   const id = escapeHtml(meta.id);
   const frontHtml = front
@@ -464,20 +462,21 @@ function coverPage(
   // hidden under noscript, by construction.
   const continueSlot = body.length > 0
     ? `<div class="continue" id="continue" hidden>
-<a id="continue-link" class="btn btn-primary" href="/w/${id}/1">Continue reading</a>
+<a id="continue-link" class="btn btn-primary" href="/w/${id}/1">${escapeHtml(t(lang, 'read.toc.continue'))}</a>
 </div>`
     : '';
 
+  const wordsLabel = t(lang, 'read.foot.words');
   const tocEntries = body
     .map((ch, i) => {
       const n = i + 1;
       const words = chapterWordCount(blocksByChapter.get(ch.id) ?? []);
-      return `<li><a href="/w/${id}/${n}"><span class="toc-num nums">${n}</span><span class="toc-label">${escapeHtml(labels[i] ?? `Chapter ${n}`)}</span><span class="toc-words nums">${words.toLocaleString('en-US')} words</span></a></li>`;
+      return `<li><a href="/w/${id}/${n}"><span class="toc-num nums">${n}</span><span class="toc-label">${escapeHtml(labels[i] ?? chapterLabel(ch, n, lang))}</span><span class="toc-words nums">${words.toLocaleString('en-US')} ${escapeHtml(wordsLabel)}</span></a></li>`;
     })
     .join('\n');
   const toc = body.length > 0
-    ? `<nav class="toc" id="toc" aria-label="Contents">
-<h2 class="toc-heading">Contents</h2>
+    ? `<nav class="toc" id="toc" aria-label="${escapeHtml(t(lang, 'read.toc.heading'))}">
+<h2 class="toc-heading">${escapeHtml(t(lang, 'read.toc.heading'))}</h2>
 <ol class="toc-list">
 ${tocEntries}
 </ol>
@@ -488,20 +487,20 @@ ${tocEntries}
     ? `(function(){
 var el=document.getElementById('continue'),ln=document.getElementById('continue-link');
 if(!el||!ln)return;
-var id=${jsValue(meta.id)},labels=${jsValue(labels)};
+var id=${jsValue(meta.id)},labels=${jsValue(labels)},pre=${jsValue(t(lang, 'read.toc.continueTo'))};
 var n=0;try{n=parseInt(localStorage.getItem('shelf.pos.'+id)||'',10);}catch(e){return;}
 if(!n||n<1||n>labels.length)return;
 ln.href='/w/'+id+'/'+n;
-ln.textContent='Continue — '+labels[n-1];
+ln.textContent=pre+' '+labels[n-1];
 el.hidden=false;
 })();`
     : '';
 
-  const pageBody = `${workHeader(bundle)}
+  const pageBody = `${workHeader(bundle, lang)}
 ${frontHtml}
 ${continueSlot}
 ${toc}
-${workFooter(bundle, meta)}`;
+${workFooter(bundle, meta, lang)}`;
 
   return bakedPage(bundle, {
     docTitle: `${bundle.title} — ${bundle.pen_name}`,
@@ -518,19 +517,20 @@ function chapterPage(
   total: number,
   ctx: RenderCtx,
   blocksByChapter: Map<string, PublishedBlock[]>,
+  lang: Lang,
 ): string {
   const id = escapeHtml(meta.id);
   const section = chapterSection(ch, blocksByChapter.get(ch.id) ?? [], ctx);
 
   const prev = n === 1
-    ? `<a class="nav-prev" href="/w/${id}" rel="prev">&larr; Cover</a>`
-    : `<a class="nav-prev" href="/w/${id}/${n - 1}" rel="prev">&larr; Previous</a>`;
-  const contents = `<a class="nav-toc" href="/w/${id}#toc">Contents</a>`;
+    ? `<a class="nav-prev" href="/w/${id}" rel="prev">&larr; ${escapeHtml(t(lang, 'read.nav.cover'))}</a>`
+    : `<a class="nav-prev" href="/w/${id}/${n - 1}" rel="prev">&larr; ${escapeHtml(t(lang, 'read.nav.previous'))}</a>`;
+  const contents = `<a class="nav-toc" href="/w/${id}#toc">${escapeHtml(t(lang, 'read.nav.contents'))}</a>`;
   const next = n === total
     ? `<span class="nav-next" aria-hidden="true"></span>`
-    : `<a class="nav-next" href="/w/${id}/${n + 1}" rel="next">Next &rarr;</a>`;
+    : `<a class="nav-next" href="/w/${id}/${n + 1}" rel="next">${escapeHtml(t(lang, 'read.nav.next'))} &rarr;</a>`;
   const nav = (cls: string): string =>
-    `<nav class="ch-nav ${cls}" aria-label="Chapter navigation">${prev}${contents}${next}</nav>`;
+    `<nav class="ch-nav ${cls}" aria-label="${escapeHtml(t(lang, 'read.toc.heading'))}">${prev}${contents}${next}</nav>`;
 
   const head = `<header class="ch-head">
 <a class="ch-back" href="/w/${id}">${escapeHtml(bundle.title)}</a>
@@ -541,7 +541,7 @@ function chapterPage(
 ${nav('ch-nav-top')}
 ${section}
 ${nav('ch-nav-bottom')}
-${workFooter(bundle, meta)}`;
+${workFooter(bundle, meta, lang)}`;
 
   // Remember the reading position for the cover's "Continue reading" slot.
   const script = `(function(){try{localStorage.setItem('shelf.pos.'+${jsValue(meta.id)},String(${n}));}catch(e){}})();`;
@@ -571,14 +571,15 @@ export interface BakedPages {
 export function renderWorkPages(bundle: PublishBundleV1, meta: PageMeta): BakedPages {
   const { ctx, blocksByChapter } = prepareBlocks(bundle);
   const ordered = orderChapters(bundle.chapters);
+  const lang = langForWork(bundle.language);
 
   if (ordered.length === 1) {
     const chapterHtml = ordered
       .map((ch) => chapterSection(ch, blocksByChapter.get(ch.id) ?? [], ctx))
       .join('\n');
-    const pageBody = `${workHeader(bundle)}
+    const pageBody = `${workHeader(bundle, lang)}
 ${chapterHtml}
-${workFooter(bundle, meta)}`;
+${workFooter(bundle, meta, lang)}`;
     const index = bakedPage(bundle, {
       docTitle: `${bundle.title} — ${bundle.pen_name}`,
       body: pageBody,
@@ -588,10 +589,10 @@ ${workFooter(bundle, meta)}`;
 
   const front = ordered.filter((ch) => FRONT_MATTER.has(ch.kind));
   const body = ordered.filter((ch) => !FRONT_MATTER.has(ch.kind));
-  const labels = body.map((ch, i) => chapterLabel(ch, i + 1));
+  const labels = body.map((ch, i) => chapterLabel(ch, i + 1, lang));
 
   return {
-    index: coverPage(bundle, meta, front, body, labels, ctx, blocksByChapter),
-    chapters: body.map((ch, i) => chapterPage(bundle, meta, ch, i + 1, body.length, ctx, blocksByChapter)),
+    index: coverPage(bundle, meta, front, body, labels, ctx, blocksByChapter, lang),
+    chapters: body.map((ch, i) => chapterPage(bundle, meta, ch, i + 1, body.length, ctx, blocksByChapter, lang)),
   };
 }

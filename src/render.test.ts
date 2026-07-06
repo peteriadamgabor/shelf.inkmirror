@@ -373,16 +373,17 @@ describe('renderWorkPage — chrome', () => {
     expect(html).toContain('<meta name="robots" content="noindex, nofollow">');
     expect(html).toContain('<html lang="hu">');
     expect(html).toContain('badge-mature');
-    expect(html).toContain('Graphic violence');
-    expect(html).toContain('Self-harm / suicide');
+    // A Hungarian work gets Hungarian chrome (warnings, footer links).
+    expect(html).toContain('Grafikus erőszak');
+    expect(html).toContain('Önbántalmazás / öngyilkosság');
     // The report form moved to the live /w/:id/report page (Phase 1.5) —
     // baked pages only link there, so the form can evolve without re-baking.
     expect(html).toContain(`href="/w/${META.id}/report"`);
-    expect(html).toContain('Report this work');
+    expect(html).toContain('Mű jelentése');
     // The letter link is baked unconditionally — the live page 404s while
     // the author's mailbox is closed; bake time cannot know the future state.
     expect(html).toContain(`href="/w/${META.id}/letter"`);
-    expect(html).toContain('Write to the author');
+    expect(html).toContain('Írj a szerzőnek');
     expect(html).not.toContain('<form');
     expect(html).toContain('prefers-reduced-motion');
   });
@@ -427,5 +428,44 @@ describe('countWords / firstLine', () => {
     });
     expect(firstLine(b).length).toBeLessThanOrEqual(140);
     expect(firstLine(b).startsWith('word word')).toBe(true);
+  });
+});
+
+describe('renderWorkPages — localized chrome', () => {
+  it('an English work gets English chrome', () => {
+    const html = renderWorkPage(bundle({ language: 'en', warnings: ['graphic-violence'] }), META);
+    expect(html).toContain('Graphic violence');
+    expect(html).toContain('Report this work');
+    expect(html).toContain('Written with InkMirror');
+  });
+
+  it('a Hungarian work gets Hungarian chrome throughout', () => {
+    const html = renderWorkPage(bundle({ language: 'hu', warnings: ['graphic-violence'] }), META);
+    expect(html).toContain('Grafikus erőszak');
+    expect(html).toContain('Mű jelentése');
+    expect(html).toContain('InkMirrorral írva'); // "Written with InkMirror"
+  });
+
+  it('an unsupported language falls back to English chrome (page lang tag preserved)', () => {
+    const html = renderWorkPage(bundle({ language: 'hi', warnings: ['graphic-violence'] }), META);
+    expect(html).toContain('<html lang="hi"');
+    expect(html).toContain('Graphic violence'); // chrome falls back to English
+  });
+
+  it('a Hungarian multi-chapter cover localizes the table of contents', () => {
+    const b = bundle({
+      language: 'hu',
+      chapters: [
+        { id: 'c1', title: 'Egy', order: 0, kind: 'standard' },
+        { id: 'c2', title: 'Kettő', order: 1, kind: 'standard' },
+      ],
+      blocks: [
+        { id: 'b1', chapter_id: 'c1', type: 'text', content: 'Első.', order: 0, metadata: { type: 'text' } },
+        { id: 'b2', chapter_id: 'c2', type: 'text', content: 'Második.', order: 1, metadata: { type: 'text' } },
+      ],
+    });
+    const { index } = renderWorkPages(b, META);
+    expect(index).toContain('>Tartalom<'); // "Contents"
+    expect(index).toContain('szó'); // "words" in TOC entries
   });
 });
