@@ -49,40 +49,56 @@ function coverGradient(workId: string): readonly [string, string] {
 }
 
 const SHELF_CSS = `
-.shelf-page{max-width:64rem;margin:0 auto;padding:0 1.25rem 4rem}
+/* A whisper of paper grain so the cream surface reads as a surface, not a void. */
+body{position:relative}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.5;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.028'/%3E%3C/svg%3E")}
+.shelf-page{max-width:64rem;margin:0 auto;padding:0 1.25rem 4rem;position:relative;z-index:1}
 .topbar{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;padding:1.1rem 0;border-bottom:1px solid var(--line)}
 .topbar-mark{font-family:var(--serif);font-weight:600;font-size:1.15rem;color:var(--ink);text-decoration:none}
 .topbar-mark .dot{color:var(--violet)}
 .topbar-links{font-size:.85rem}
 .topbar-links a{color:var(--muted);text-decoration:none;border-bottom:1px solid var(--line);padding-bottom:1px}
 .topbar-links a:hover,.topbar-links a:focus{color:var(--violet);border-color:var(--violet)}
-.shelf-head{text-align:center;padding:2.8rem 0 .4rem}
+.shelf-head{text-align:center;padding:3rem 0 .4rem}
 .shelf-hearts{display:flex;justify-content:center;gap:.5rem;margin-bottom:1.1rem}
 .shelf-heart{width:.85rem;height:.85rem;border-radius:999px}
 .shelf-heart.violet{background:var(--violet)}
 .shelf-heart.ember{background:var(--ember);opacity:.92}
-.shelf-head h1{font-family:var(--serif);font-weight:600;font-size:clamp(2.1rem,6vw,2.8rem);letter-spacing:-.02em;margin:0 0 .5rem}
+.shelf-head h1{font-family:var(--serif);font-weight:600;font-size:clamp(2.2rem,6vw,3rem);letter-spacing:-.02em;margin:0 0 .55rem}
 .shelf-head h1 .dot{color:var(--violet)}
-.shelf-tag{color:var(--muted);max-width:32rem;margin:0 auto;font-size:1rem}
-.shelf-count{color:var(--muted);font-size:.85rem;margin:.6rem 0 0}
-.chips{display:flex;flex-wrap:wrap;justify-content:center;gap:.5rem;padding:1.6rem 0 2.2rem}
-.chip{display:inline-block;font:500 .82rem/1 var(--sans);letter-spacing:.04em;padding:.5rem .95rem;
+.shelf-tag{color:var(--muted);max-width:32rem;margin:0 auto;font-size:1.02rem;line-height:1.55}
+.shelf-count{color:var(--muted);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;margin:.9rem 0 0}
+.chips{display:flex;flex-wrap:wrap;justify-content:center;gap:.5rem;padding:1.7rem 0 2.6rem}
+.chip{display:inline-block;font:500 .82rem/1 var(--sans);letter-spacing:.04em;padding:.55rem 1rem;
   border-radius:999px;border:1px solid var(--line);color:var(--muted);text-decoration:none;
-  background:var(--surface);transition:color .15s,border-color .15s}
+  background:var(--surface);box-shadow:0 1px 2px rgb(0 0 0 / .04);transition:color .15s,border-color .15s,transform .1s}
 .chip:hover,.chip:focus{color:var(--violet);border-color:var(--violet)}
-.chip.active{background:var(--violet);border-color:var(--violet);color:#fff}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1.6rem 1.4rem}
-@media (max-width:560px){.grid{grid-template-columns:repeat(2,1fr);gap:1.3rem .9rem}}
-@media (max-width:330px){.grid{grid-template-columns:1fr}}
-.wcard{display:block;text-decoration:none;color:var(--ink)}
-.cover{aspect-ratio:2/2.9;border-radius:8px;display:flex;flex-direction:column;justify-content:space-between;
-  padding:1.1rem .95rem;overflow:hidden;box-shadow:0 6px 18px -8px rgb(0 0 0 / .35);
-  transition:transform .18s ease,box-shadow .18s ease}
-.wcard:hover .cover,.wcard:focus .cover{transform:translateY(-3px);box-shadow:0 12px 26px -10px rgb(0 0 0 / .4)}
-.cover-title{font-family:var(--serif);font-weight:600;color:#fff;font-size:1.05rem;line-height:1.3;
-  overflow-wrap:break-word;display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
-.cover-pen{font-family:var(--sans);font-size:.62rem;font-weight:600;letter-spacing:.16em;text-transform:uppercase;
-  color:rgb(255 255 255 / .82);overflow-wrap:break-word}
+.chip:active{transform:translateY(1px)}
+.chip.active{background:var(--violet);border-color:var(--violet);color:#fff;box-shadow:0 4px 12px -4px color-mix(in srgb,var(--violet) 55%,transparent)}
+/* Flexbox, centered: one card sits centered, many fill and the last row
+   centers too — never a lone card stranded to the left (grid auto-fit's
+   track centering is unreliable across browsers). */
+.grid{display:flex;flex-wrap:wrap;justify-content:center;gap:2.4rem 1.7rem}
+.wcard{flex:0 0 196px;width:196px;text-decoration:none;color:var(--ink)}
+@media (max-width:560px){.grid{gap:1.8rem 1.1rem}.wcard{flex:0 0 calc(50% - .55rem);width:auto}}
+@media (max-width:340px){.wcard{flex-basis:100%}}
+.cover{position:relative;aspect-ratio:2/3;border-radius:5px 7px 7px 5px;display:flex;flex-direction:column;justify-content:space-between;
+  padding:1.15rem 1rem 1.1rem 1.25rem;overflow:hidden;
+  box-shadow:0 1px 2px rgb(0 0 0 / .2), 0 14px 28px -12px rgb(0 0 0 / .5);
+  transition:transform .2s ease,box-shadow .2s ease}
+/* spine: a darker edge + a thin highlight, like the gutter of a real book */
+.cover::before{content:"";position:absolute;left:0;top:0;bottom:0;width:12px;border-radius:5px 0 0 5px;
+  background:linear-gradient(90deg,rgb(0 0 0 / .28),rgb(0 0 0 / 0) 55%),linear-gradient(90deg,transparent,rgb(255 255 255 / .22) 62%,transparent 70%)}
+/* sheen from the top-left + a soft bottom vignette for depth */
+.cover::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:radial-gradient(130% 80% at 28% -5%,rgb(255 255 255 / .16),transparent 55%);
+  box-shadow:inset 0 0 0 1px rgb(255 255 255 / .08), inset 0 -46px 60px -34px rgb(0 0 0 / .4)}
+.wcard:hover .cover,.wcard:focus .cover{transform:translateY(-4px) rotate(-.4deg);box-shadow:0 2px 4px rgb(0 0 0 / .22), 0 22px 40px -14px rgb(0 0 0 / .55)}
+.cover-title{position:relative;z-index:1;font-family:var(--serif);font-weight:600;color:#fff;font-size:1.08rem;line-height:1.28;
+  text-shadow:0 1px 2px rgb(0 0 0 / .25);overflow-wrap:break-word;display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
+.cover-pen{position:relative;z-index:1;font-family:var(--sans);font-size:.6rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;
+  color:rgb(255 255 255 / .85);overflow-wrap:break-word}
 .card-title{font-family:var(--serif);font-weight:600;font-size:1rem;line-height:1.3;margin:.75rem 0 0;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .card-first{font-family:var(--serif);font-style:italic;color:var(--muted);font-size:.88rem;line-height:1.45;margin:.3rem 0 0;
