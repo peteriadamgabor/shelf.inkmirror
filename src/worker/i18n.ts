@@ -63,7 +63,7 @@ const en: Dict = {
       back: 'Take me back',
       noscript: 'This work is rated for adults. Enable JavaScript to confirm your age and read it.',
     },
-    nav: { cover: 'Cover', previous: 'Previous', next: 'Next', contents: 'Contents' },
+    nav: { cover: 'Cover', previous: 'Previous', next: 'Next', contents: 'Contents', shelf: 'The Shelf' },
     toc: { heading: 'Contents', continue: 'Continue reading', continueTo: 'Continue —' },
     chapterN: 'Chapter', // "Chapter 3" when a chapter hides its title
     min: 'min', // reading-time unit ("~5 min")
@@ -177,7 +177,7 @@ const hu: Dict = {
       back: 'Vissza',
       noscript: 'Ez a mű felnőtteknek szól. Engedélyezd a JavaScriptet a korod megerősítéséhez.',
     },
-    nav: { cover: 'Borító', previous: 'Előző', next: 'Következő', contents: 'Tartalom' },
+    nav: { cover: 'Borító', previous: 'Előző', next: 'Következő', contents: 'Tartalom', shelf: 'A Polc' },
     toc: { heading: 'Tartalom', continue: 'Folytatás', continueTo: 'Folytatás —' },
     chapterN: 'fejezet', // Hungarian: "3. fejezet" — number precedes, handled at the call site
     min: 'perc',

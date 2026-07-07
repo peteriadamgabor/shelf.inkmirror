@@ -263,7 +263,10 @@ body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opa
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.028'/%3E%3C/svg%3E")}
 main{max-width:var(--rmw);margin:0 auto;padding:0 1.25rem 4rem;position:relative;z-index:1;
   font-family:var(--rfam);font-size:calc(1.0625rem * var(--rfs));line-height:var(--rlh)}
-.work-head{padding:3.5rem 0 1rem;text-align:center;border-bottom:1px solid var(--line);margin-bottom:2.5rem}
+.cover-back{padding:1.4rem 0 0;font-family:var(--sans);font-size:.85rem}
+.cover-back a{color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:.4rem;transition:color .15s,gap .15s}
+.cover-back a:hover,.cover-back a:focus{color:var(--violet);gap:.55rem}
+.work-head{padding:2rem 0 1rem;text-align:center;border-bottom:1px solid var(--line);margin-bottom:2.5rem}
 .work-title{font-family:var(--serif);font-weight:600;font-size:2.1rem;line-height:1.2;margin:0 0 .35rem}
 .byline{color:var(--muted);margin:0 0 1rem;font-size:.95rem}
 .labels{display:flex;flex-wrap:wrap;gap:.4rem;justify-content:center;margin:0 0 1rem}
@@ -740,7 +743,8 @@ el.hidden=false;
 })();`
     : '';
 
-  const pageBody = `${workHeader(bundle, lang)}
+  const pageBody = `<p class="cover-back"><a href="/shelf">&larr; ${escapeHtml(t(lang, 'read.nav.shelf'))}</a></p>
+${workHeader(bundle, lang)}
 ${frontHtml}
 ${continueSlot}
 ${toc}
@@ -823,7 +827,8 @@ export function renderWorkPages(bundle: PublishBundleV1, meta: PageMeta): BakedP
     const only = ordered[0];
     const chapterHtml = only ? chapterSection(only, blocksByChapter.get(only.id) ?? [], ctx) : '';
     const words = only ? chapterWordCount(blocksByChapter.get(only.id) ?? []) : 0;
-    const pageBody = `${workHeader(bundle, lang)}
+    const pageBody = `<p class="cover-back"><a href="/shelf">&larr; ${escapeHtml(t(lang, 'read.nav.shelf'))}</a></p>
+${workHeader(bundle, lang)}
 ${chapterHtml}
 ${workFooter(bundle, meta, lang)}`;
     const index = bakedPage(bundle, {

@@ -225,6 +225,9 @@ describe('renderWorkPages — chapter kinds', () => {
       { id: 'b3', chapter_id: 'epi', type: 'text', content: 'FRONTMARKER', order: 0, metadata: { type: 'text' } },
     ];
     const pages = renderWorkPages(bundle({ chapters, blocks }), META);
+    // The cover offers a way back to the browse shelf.
+    expect(pages.index).toContain('class="cover-back"');
+    expect(pages.index).toContain('href="/shelf"');
     // Front matter lives on the cover — chapter prose does not.
     expect(pages.index).toContain('FRONTMARKER');
     expect(pages.index).not.toContain('MIDDLEMARKER');
