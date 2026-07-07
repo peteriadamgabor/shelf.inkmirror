@@ -347,11 +347,25 @@ main{max-width:var(--rmw);margin:0 auto;padding:0 1.25rem 4rem;position:relative
 .ch-nav-top{margin:.9rem 0 0}
 .ch-nav-bottom{border-top:1px solid var(--line);margin-top:3rem;padding-top:1.2rem}
 
-/* ---------- reading progress ---------- */
+/* ---------- reading progress + QoL chrome ---------- */
 .reading-progress{position:fixed;top:0;left:0;height:3px;width:0;z-index:30;
   background:linear-gradient(90deg,var(--violet),color-mix(in srgb,var(--violet) 70%,var(--ember)));
   transition:width .1s linear}
-@media (prefers-reduced-motion: reduce){.reading-progress{transition:none}}
+/* time-left + whole-work % pill, bottom-left; slides away as you read down */
+.rmeta{position:fixed;left:1rem;bottom:1rem;z-index:19;font:600 .72rem/1 var(--sans);
+  color:var(--muted);background:color-mix(in srgb,var(--surface) 90%,transparent);
+  border:1px solid var(--line);border-radius:999px;padding:.45rem .75rem;
+  box-shadow:0 2px 10px rgb(0 0 0 / .1);opacity:0;pointer-events:none;
+  transform:translateY(.5rem);transition:opacity .22s,transform .22s;font-variant-numeric:tabular-nums}
+.rmeta.show{opacity:1;transform:none}
+/* back-to-top, above the settings toggle; appears once you're deep in a chapter */
+.rbtt{position:fixed;right:1rem;bottom:4.6rem;z-index:19;width:2.6rem;height:2.6rem;
+  border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--ink);
+  font-size:1.1rem;line-height:1;cursor:pointer;box-shadow:0 4px 14px rgb(0 0 0 / .14);
+  opacity:0;pointer-events:none;transform:translateY(.6rem);transition:opacity .2s,transform .2s,color .15s,border-color .15s}
+.rbtt.show{opacity:1;pointer-events:auto;transform:none}
+.rbtt:hover,.rbtt:focus{color:var(--violet);border-color:var(--violet)}
+@media (prefers-reduced-motion: reduce){.reading-progress,.rmeta,.rbtt{transition:none}}
 
 /* ---------- reading settings ---------- */
 .rs-toggle{position:fixed;right:1rem;bottom:1rem;z-index:20;width:2.9rem;height:2.9rem;
@@ -514,32 +528,34 @@ seg.querySelectorAll('button').forEach(function(b){b.setAttribute('aria-pressed'
 })();`;
 
 /**
- * Touch navigation: swipe left/right to turn the page (prev/next chapter).
- * Reads the rel=prev / rel=next anchors already in the chapter nav, so it is a
- * no-op on the cover and single-chapter works. Honours RTL (forward is the
- * other way), ignores vertical scrolls and swipes that begin on the settings
- * panel, and never fires when the reader is selecting text.
+ * Touch navigation. Two gestures, both reading the rel=prev/next anchors in
+ * the chapter nav (no-op on the cover / single-chapter works), RTL-aware, and
+ * ignoring anything that starts on a link/control or during text selection:
+ *   - SWIPE left/right to turn the page;
+ *   - TAP the far-left / far-right screen edge (< 12% / > 88%) to turn the
+ *     page, e-reader style. The central reading area never navigates on tap.
  */
 const READING_SWIPE_JS = `(function(){
 if(!('ontouchstart' in window))return;
 var sx=0,sy=0,st=0,ok=false;
-function href(sel){var a=document.querySelector(sel);return a&&a.tagName==='A'?a.getAttribute('href'):null;}
+function go(sel){var a=document.querySelector(sel);if(a&&a.tagName==='A')location.href=a.getAttribute('href');}
+function rtl(){return document.documentElement.getAttribute('dir')==='rtl';}
 document.addEventListener('touchstart',function(e){
 if(e.touches.length!==1){ok=false;return;}
 var tg=e.target;
-if(tg&&tg.closest&&tg.closest('.rs-panel,.rs-toggle,a,button,input,textarea,select')){ok=false;return;}
+if(tg&&tg.closest&&tg.closest('.rs-panel,.rs-toggle,.rbtt,.rmeta,a,button,input,textarea,select')){ok=false;return;}
 sx=e.touches[0].clientX;sy=e.touches[0].clientY;st=Date.now();ok=true;
 },{passive:true});
 document.addEventListener('touchend',function(e){
 if(!ok)return;ok=false;
 if(String(document.getSelection?document.getSelection():'').length>0)return;
-var t=e.changedTouches[0],dx=t.clientX-sx,dy=t.clientY-sy;
-if(Date.now()-st>700)return;
-if(Math.abs(dx)<70||Math.abs(dx)<Math.abs(dy)*1.7)return;
-var rtl=document.documentElement.getAttribute('dir')==='rtl';
-var forward=rtl?dx>0:dx<0;
-var url=forward?href('a[rel="next"]'):href('a[rel="prev"]');
-if(url)location.href=url;
+var t=e.changedTouches[0],dx=t.clientX-sx,dy=t.clientY-sy,dt=Date.now()-st,adx=Math.abs(dx),ady=Math.abs(dy);
+// Swipe: a decisive horizontal drag.
+if(dt<=700&&adx>=70&&adx>=ady*1.7){var f=rtl()?dx>0:dx<0;go(f?'a[rel="next"]':'a[rel="prev"]');return;}
+// Tap: barely moved, quick, and landed on a screen edge.
+if(dt<=350&&adx<12&&ady<12){var w=window.innerWidth,x=t.clientX;
+if(x<w*0.12)go(rtl()?'a[rel="next"]':'a[rel="prev"]');
+else if(x>w*0.88)go(rtl()?'a[rel="prev"]':'a[rel="next"]');}
 },{passive:true});
 })();`;
 
@@ -556,19 +572,32 @@ if(url)location.href=url;
 const READING_QOL_JS = `(function(){
 var doc=document.documentElement,work=document.getElementById('work'),bar=document.getElementById('rprog');
 if(!work)return;
-var KEY='shelf.scroll.'+location.pathname;
+var rq=window.__rq||null,WPM=230,KEY='shelf.scroll.'+location.pathname;
+var meta=document.getElementById('rmeta'),btt=document.getElementById('rbtt');
 function maxScroll(){return doc.scrollHeight-window.innerHeight;}
-// Restore after two frames so reader-settings layout has settled. Skipped
-// while the age gate hides the prose (nothing to scroll yet).
-if(!work.hidden){try{var f=parseFloat(localStorage.getItem(KEY)||'');
-if(f>0&&f<=1)requestAnimationFrame(function(){requestAnimationFrame(function(){
-var m=maxScroll();if(m>40)window.scrollTo(0,f*m);});});}catch(e){}}
-var raf=0;
-function tick(){raf=0;var m=maxScroll();var f=m>0?Math.min(1,Math.max(0,window.scrollY/m)):0;
+// EXACT resume: restore after two frames so reader-settings layout has
+// settled. Skipped while the age gate hides the prose.
+if(!work.hidden){try{var sf=parseFloat(localStorage.getItem(KEY)||'');
+if(sf>0&&sf<=1)requestAnimationFrame(function(){requestAnimationFrame(function(){
+var m=maxScroll();if(m>40)window.scrollTo(0,sf*m);});});}catch(e){}}
+var raf=0,lastY=window.scrollY;
+function paint(){raf=0;var m=maxScroll(),y=window.scrollY,f=m>0?Math.min(1,Math.max(0,y/m)):0;
 if(bar)bar.style.width=(f*100).toFixed(1)+'%';
-try{localStorage.setItem(KEY,f.toFixed(4));}catch(e){}}
-window.addEventListener('scroll',function(){if(!raf)raf=requestAnimationFrame(tick);},{passive:true});
-tick();
+try{localStorage.setItem(KEY,f.toFixed(4));}catch(e){}
+// time-left in this chapter + progress through the whole work
+if(meta&&rq){var chLeft=Math.max(0,Math.round(rq.cw*(1-f)/WPM));
+var over=rq.tw>0?Math.round(((rq.pw+rq.cw*f)/rq.tw)*100):0;
+meta.textContent=(chLeft<=0?'\\u2713':'~'+chLeft+' '+(rq.ml||'min'))+' \\u00b7 '+over+'%';}
+// back-to-top by depth
+if(btt)btt.classList.toggle('show',y>window.innerHeight*1.2);
+// immersion: the meta pill slides away as you read forward, returns on the way back
+if(meta&&rq){if(y>lastY+10)meta.classList.remove('show');else if(y<lastY-10||y<24)meta.classList.add('show');}
+lastY=y;}
+window.addEventListener('scroll',function(){if(!raf)raf=requestAnimationFrame(paint);},{passive:true});
+if(meta&&rq)meta.classList.add('show');
+paint();
+if(btt)btt.addEventListener('click',function(){try{window.scrollTo({top:0,behavior:'smooth'});}catch(e){window.scrollTo(0,0);}});
+// ArrowLeft/Right turn the page (desktop companion to swipe), RTL-aware
 document.addEventListener('keydown',function(e){
 if(e.defaultPrevented||e.altKey||e.ctrlKey||e.metaKey||e.shiftKey)return;
 var tg=e.target;if(tg&&/^(INPUT|TEXTAREA|SELECT)$/.test(tg.tagName))return;
@@ -577,12 +606,22 @@ var rtl=doc.getAttribute('dir')==='rtl',fwd=rtl?e.key==='ArrowLeft':e.key==='Arr
 var a=document.querySelector(fwd?'a[rel="next"]':'a[rel="prev"]');
 if(a&&a.tagName==='A'){e.preventDefault();location.href=a.getAttribute('href');}
 });
+// Instant page turns: warm the next/prev chapter into the HTTP cache when idle.
+function warm(sel){var a=document.querySelector(sel);if(a&&a.tagName==='A'){try{fetch(a.getAttribute('href'),{credentials:'same-origin'}).catch(function(){});}catch(e){}}}
+(window.requestIdleCallback||function(fn){return setTimeout(fn,1400);})(function(){warm('a[rel="next"]');warm('a[rel="prev"]');});
 })();`;
+
+/** Word stats for the time-left / whole-work progress readout. */
+interface ReadingStats {
+  /** words in THIS chapter */ cw: number;
+  /** words in all PRIOR chapters */ pw: number;
+  /** total words in the work */ tw: number;
+}
 
 /** Wrap page body in the full HTML document, with the age gate when rated. */
 function bakedPage(
   bundle: PublishBundleV1,
-  opts: { docTitle: string; body: string; script?: string },
+  opts: { docTitle: string; body: string; script?: string; stats?: ReadingStats },
 ): string {
   const gated = bundle.rating !== 'general';
   const main = `<main id="work"${gated ? ' hidden' : ''}>
@@ -590,7 +629,11 @@ ${opts.body}
 </main>`;
 
   const lang = langForWork(bundle.language);
-  const js = `${gated ? AGE_GATE_JS : ''}${opts.script ?? ''}${READING_SETTINGS_JS}${READING_SWIPE_JS}${READING_QOL_JS}`;
+  const statsJs =
+    opts.stats !== undefined
+      ? `window.__rq=${jsValue({ ...opts.stats, ml: t(lang, 'read.min') })};`
+      : '';
+  const js = `${statsJs}${gated ? AGE_GATE_JS : ''}${opts.script ?? ''}${READING_SETTINGS_JS}${READING_SWIPE_JS}${READING_QOL_JS}`;
   const script = `<script>${js}</script>\n`;
 
   const rtl = RTL_LANGUAGES.has(bundle.language.toLowerCase().split('-')[0] ?? '');
@@ -610,6 +653,8 @@ ${opts.body}
 <div class="reading-progress" id="rprog" aria-hidden="true"></div>
 ${gated ? ageGate(bundle, lang) : ''}
 ${main}
+<div class="rmeta" id="rmeta" aria-hidden="true"></div>
+<button class="rbtt" id="rbtt" type="button" aria-label="${escapeHtml(t(lang, 'read.nav.contents'))}" title="&#8593;">&#8593;</button>
 ${readingSettingsPanel(lang)}
 ${script}</body>
 </html>`;
@@ -663,13 +708,14 @@ function coverPage(
 </div>`
     : '';
 
-  const wordsLabel = t(lang, 'read.foot.words');
+  const minLabel = t(lang, 'read.min');
   const tocEntries = body
     .map((ch, i) => {
       const n = i + 1;
       const words = chapterWordCount(blocksByChapter.get(ch.id) ?? []);
+      const mins = Math.max(1, Math.round(words / 230));
       // rel="next" on the first entry lets a forward swipe on the cover open chapter 1.
-      return `<li><a href="/w/${id}/${n}"${n === 1 ? ' rel="next"' : ''}><span class="toc-num nums">${n}</span><span class="toc-label">${escapeHtml(labels[i] ?? chapterLabel(ch, n, lang))}</span><span class="toc-words nums">${words.toLocaleString('en-US')} ${escapeHtml(wordsLabel)}</span></a></li>`;
+      return `<li><a href="/w/${id}/${n}"${n === 1 ? ' rel="next"' : ''}><span class="toc-num nums">${n}</span><span class="toc-label">${escapeHtml(labels[i] ?? chapterLabel(ch, n, lang))}</span><span class="toc-words nums">~${mins} ${escapeHtml(minLabel)}</span></a></li>`;
     })
     .join('\n');
   const toc = body.length > 0
@@ -716,6 +762,7 @@ function chapterPage(
   ctx: RenderCtx,
   blocksByChapter: Map<string, PublishedBlock[]>,
   lang: Lang,
+  stats: ReadingStats,
 ): string {
   const id = escapeHtml(meta.id);
   const section = chapterSection(ch, blocksByChapter.get(ch.id) ?? [], ctx);
@@ -748,6 +795,7 @@ ${workFooter(bundle, meta, lang)}`;
     docTitle: `${bundle.title} · ${n} / ${total} — ${bundle.pen_name}`,
     body: pageBody,
     script,
+    stats,
   });
 }
 
@@ -772,15 +820,16 @@ export function renderWorkPages(bundle: PublishBundleV1, meta: PageMeta): BakedP
   const lang = langForWork(bundle.language);
 
   if (ordered.length === 1) {
-    const chapterHtml = ordered
-      .map((ch) => chapterSection(ch, blocksByChapter.get(ch.id) ?? [], ctx))
-      .join('\n');
+    const only = ordered[0];
+    const chapterHtml = only ? chapterSection(only, blocksByChapter.get(only.id) ?? [], ctx) : '';
+    const words = only ? chapterWordCount(blocksByChapter.get(only.id) ?? []) : 0;
     const pageBody = `${workHeader(bundle, lang)}
 ${chapterHtml}
 ${workFooter(bundle, meta, lang)}`;
     const index = bakedPage(bundle, {
       docTitle: `${bundle.title} — ${bundle.pen_name}`,
       body: pageBody,
+      stats: { cw: words, pw: 0, tw: words },
     });
     return { index, chapters: [] };
   }
@@ -789,8 +838,18 @@ ${workFooter(bundle, meta, lang)}`;
   const body = ordered.filter((ch) => !FRONT_MATTER.has(ch.kind));
   const labels = body.map((ch, i) => chapterLabel(ch, i + 1, lang));
 
+  // Cumulative word counts feed the per-chapter time-left / whole-work readout.
+  const bodyWords = body.map((ch) => chapterWordCount(blocksByChapter.get(ch.id) ?? []));
+  const totalWords = bodyWords.reduce((a, b) => a + b, 0);
+  let prior = 0;
+  const chapters = body.map((ch, i) => {
+    const stats: ReadingStats = { cw: bodyWords[i] ?? 0, pw: prior, tw: totalWords };
+    prior += bodyWords[i] ?? 0;
+    return chapterPage(bundle, meta, ch, i + 1, body.length, ctx, blocksByChapter, lang, stats);
+  });
+
   return {
     index: coverPage(bundle, meta, front, body, labels, ctx, blocksByChapter, lang),
-    chapters: body.map((ch, i) => chapterPage(bundle, meta, ch, i + 1, body.length, ctx, blocksByChapter, lang)),
+    chapters,
   };
 }

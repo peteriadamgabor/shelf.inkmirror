@@ -66,6 +66,7 @@ const en: Dict = {
     nav: { cover: 'Cover', previous: 'Previous', next: 'Next', contents: 'Contents' },
     toc: { heading: 'Contents', continue: 'Continue reading', continueTo: 'Continue —' },
     chapterN: 'Chapter', // "Chapter 3" when a chapter hides its title
+    min: 'min', // reading-time unit ("~5 min")
     foot: { letter: 'Write to the author', report: 'Report this work', mark: 'Written with InkMirror', words: 'words' },
     settings: {
       title: 'Reading settings', size: 'Text size', smaller: 'Smaller text', larger: 'Larger text',
@@ -179,6 +180,7 @@ const hu: Dict = {
     nav: { cover: 'Borító', previous: 'Előző', next: 'Következő', contents: 'Tartalom' },
     toc: { heading: 'Tartalom', continue: 'Folytatás', continueTo: 'Folytatás —' },
     chapterN: 'fejezet', // Hungarian: "3. fejezet" — number precedes, handled at the call site
+    min: 'perc',
     foot: { letter: 'Írj a szerzőnek', report: 'Mű jelentése', mark: 'InkMirrorral írva', words: 'szó' },
     settings: {
       title: 'Olvasási beállítások', size: 'Betűméret', smaller: 'Kisebb betű', larger: 'Nagyobb betű',

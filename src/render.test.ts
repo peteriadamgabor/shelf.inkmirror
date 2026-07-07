@@ -290,7 +290,7 @@ describe('renderWorkPages — chaptered reading', () => {
     expect(pages.index).toContain('Two hearts, one soul.');
   });
 
-  it('multi-chapter: cover carries front-matter prose, TOC with word counts, hidden continue slot', () => {
+  it('multi-chapter: cover carries front-matter prose, TOC with reading times, hidden continue slot', () => {
     const pages = renderWorkPages(threeChapterBundle(), META);
     expect(pages.chapters).toHaveLength(3);
 
@@ -301,8 +301,8 @@ describe('renderWorkPages — chaptered reading', () => {
     expect(cover).toContain(`href="/w/${META.id}/3"`);
     expect(cover).toContain('The Door');
     expect(cover).toContain('The Mirror');
-    expect(cover).toContain('<span class="toc-words nums">4 words</span>');
-    expect(cover).toContain('<span class="toc-words nums">2 words</span>');
+    // Short chapters both round to ~1 min of reading.
+    expect(cover).toContain('<span class="toc-words nums">~1 min</span>');
     // Continue slot: hidden until inline JS finds a position (noscript-safe).
     expect(cover).toContain('id="continue" hidden');
     expect(cover).toContain(`shelf.pos.`);
@@ -470,6 +470,41 @@ describe('renderWorkPages — localized chrome', () => {
     });
     const { index } = renderWorkPages(b, META);
     expect(index).toContain('>Tartalom<'); // "Contents"
-    expect(index).toContain('szó'); // "words" in TOC entries
+    expect(index).toContain('perc'); // "min" (reading time) in TOC entries
+  });
+});
+
+describe('renderWorkPages — reading QoL', () => {
+  // ch1 "one two three four" (4), ch2 "five six" (2), ch3 "seven eight nine" (3) → tw=9.
+  const qBundle = bundle({
+    chapters: [
+      { id: 'c1', title: 'One', order: 0, kind: 'standard' },
+      { id: 'c2', title: 'Two', order: 1, kind: 'standard' },
+      { id: 'c3', title: 'Three', order: 2, kind: 'standard' },
+    ],
+    blocks: [
+      { id: 'b1', chapter_id: 'c1', type: 'text', content: 'one two three four', order: 0, metadata: { type: 'text' } },
+      { id: 'b2', chapter_id: 'c2', type: 'text', content: 'five six', order: 1, metadata: { type: 'text' } },
+      { id: 'b3', chapter_id: 'c3', type: 'text', content: 'seven eight nine', order: 2, metadata: { type: 'text' } },
+    ],
+  });
+
+  it('chapter pages carry the progress bar, resume/keyboard/prefetch, time-left stats, and touch nav', () => {
+    const page = renderWorkPages(qBundle, META).chapters[0] ?? '';
+    expect(page).toContain('id="rprog"'); // progress bar
+    expect(page).toContain('id="rmeta"'); // time-left / whole-work pill
+    expect(page).toContain('id="rbtt"'); // back-to-top
+    expect(page).toContain('window.__rq='); // reading stats for time-left
+    expect(page).toContain("'shelf.scroll.'+location.pathname"); // exact resume
+    expect(page).toContain("e.key==='ArrowLeft'"); // keyboard nav
+    expect(page).toContain('requestIdleCallback'); // prefetch on idle
+    expect(page).toContain('ontouchstart'); // swipe + tap
+  });
+
+  it('embeds cumulative word stats so a mid-work chapter knows its place', () => {
+    const page2 = renderWorkPages(qBundle, META).chapters[1] ?? '';
+    expect(page2).toMatch(/window\.__rq=\{[^}]*"cw":2/);
+    expect(page2).toMatch(/window\.__rq=\{[^}]*"pw":4/); // 4 words before chapter 2
+    expect(page2).toMatch(/window\.__rq=\{[^}]*"tw":9/);
   });
 });
