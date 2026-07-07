@@ -17,7 +17,7 @@ function bundle(overrides: Partial<PublishBundleV1> = {}): PublishBundleV1 {
     language: 'en',
     rating: 'general',
     warnings: [],
-    document: { synopsis: '', pov_character_id: null },
+    document: { synopsis: '', pov_character_id: null, cover_image: null },
     chapters: [{ id: 'ch1', title: 'One', order: 0, kind: 'standard' }],
     blocks: [
       {
@@ -153,7 +153,7 @@ describe('renderWorkPage — dialogue', () => {
     const html = renderWorkPage(
       bundle({
         characters: chars,
-        document: { synopsis: '', pov_character_id: 'me' },
+        document: { synopsis: '', pov_character_id: 'me', cover_image: null },
         blocks: [dlg('b1', 'me', 0), dlg('b2', 'them', 1)],
       }),
       META,
@@ -238,6 +238,19 @@ describe('renderWorkPages — chapter kinds', () => {
     expect(pages.chapters[1]).toContain('BACKMARKER');
   });
 
+  it('a cover image renders as a hero on the cover page, referenced by URL not inlined', () => {
+    const withCover = renderWorkPage(
+      bundle({ document: { synopsis: '', pov_character_id: null, cover_image: 'data:image/png;base64,AAAA' } }),
+      META,
+    );
+    expect(withCover).toContain('<figure class="cover-hero">');
+    expect(withCover).toContain(`src="/w/${META.id}/cover"`);
+    // The bytes are served separately — the huge data URI never lands in the HTML.
+    expect(withCover).not.toContain('data:image/png');
+    // No cover set → no hero element (the CSS rule is always present).
+    expect(renderWorkPage(bundle(), META)).not.toContain('<figure class="cover-hero">');
+  });
+
   it('front-matter kinds hide the title by default and center content; standard prints it', () => {
     const chapters: PublishedChapter[] = [
       { id: 'epi', title: 'EpigraphTitle', order: 0, kind: 'epigraph' },
@@ -313,7 +326,7 @@ describe('renderWorkPages — chaptered reading', () => {
   });
 
   it('chapter page 2: slim header, prev /1, next /3, position stamp, full-work footer', () => {
-    const bundle3 = threeChapterBundle({ document: { synopsis: '', pov_character_id: null } });
+    const bundle3 = threeChapterBundle({ document: { synopsis: '', pov_character_id: null, cover_image: null } });
     const pages = renderWorkPages(bundle3, META);
     const page2 = pages.chapters[1] ?? '';
     expect(page2).toContain(`<a class="ch-back" href="/w/${META.id}">A Quiet Book</a>`);

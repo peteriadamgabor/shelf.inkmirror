@@ -39,6 +39,7 @@ import type { Env } from './env';
 import { contentHash } from './content-hash';
 import {
   consumeChainBudget,
+  coverToken,
   parseModerationVerdict,
   runChainVerdict,
   verdictFingerprint,
@@ -226,7 +227,12 @@ export async function runListingGate(env: Env, workId: string): Promise<void> {
     // reused error/skipped is never reused (a broken run is not an
     // observation).
     const currentHash = await contentHash(bundle);
-    const currentFingerprint = verdictFingerprint(currentHash, bundle.rating, bundle.warnings);
+    const currentFingerprint = verdictFingerprint(
+      currentHash,
+      bundle.rating,
+      bundle.warnings,
+      await coverToken(bundle),
+    );
     const stored = parseModerationVerdict(row.moderation_verdict);
     const reused =
       stored !== null &&

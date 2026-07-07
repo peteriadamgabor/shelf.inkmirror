@@ -36,6 +36,13 @@ export interface WorkRow {
    */
   content_hash: string | null;
   /**
+   * Mime of the author's cover image (`image/png|jpeg|webp`) when one is
+   * stored at works/{id}/cover in R2; NULL = no cover (the gallery card and
+   * cover page fall back to the generated CSS cover). The card only needs to
+   * know a cover EXISTS — the bytes are served from R2, never carried in D1.
+   */
+  cover_mime: string | null;
+  /**
    * Phase 3 listing lifecycle: NULL (never requested) | 'pending' | 'listed'
    * | 'refused' | 'held'. Invariant: listed = 1 iff listing_state = 'listed'.
    */
@@ -70,6 +77,8 @@ export interface NewWork {
   expires_at: string;
   /** PBKDF2 hash when the work is published already-locked; else NULL. */
   password_hash?: string | null;
+  /** Mime of the stored cover image, or null when the author set no cover. */
+  cover_mime?: string | null;
 }
 
 export interface WorkUpdate {
@@ -82,6 +91,8 @@ export interface WorkUpdate {
   first_line: string;
   content_hash: string;
   updated_at: string;
+  /** Mime of the re-baked cover image, or null when the author cleared it. */
+  cover_mime?: string | null;
   /**
    * True when the content or labels actually changed. Then the stored
    * moderation verdict no longer describes this artifact, so it is cleared,
@@ -102,8 +113,8 @@ export async function insertWork(db: D1Database, w: NewWork): Promise<void> {
     .prepare(
       `INSERT INTO works
         (id, secret_hash, title, pen_name, language, rating, warnings,
-         word_count, first_line, content_hash, created_at, updated_at, expires_at, password_hash)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
+         word_count, first_line, content_hash, created_at, updated_at, expires_at, password_hash, cover_mime)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
     )
     .bind(
       w.id,
@@ -120,6 +131,7 @@ export async function insertWork(db: D1Database, w: NewWork): Promise<void> {
       w.updated_at,
       w.expires_at,
       w.password_hash ?? null,
+      w.cover_mime ?? null,
     )
     .run();
 }
@@ -135,8 +147,8 @@ export async function updateWork(db: D1Database, id: string, u: WorkUpdate): Pro
   await db
     .prepare(
       `UPDATE works SET title = ?1, pen_name = ?2, language = ?3, rating = ?4, warnings = ?5,
-         word_count = ?6, first_line = ?7, content_hash = ?8, updated_at = ?9${resetClause}
-       WHERE id = ?10`,
+         word_count = ?6, first_line = ?7, content_hash = ?8, updated_at = ?9, cover_mime = ?10${resetClause}
+       WHERE id = ?11`,
     )
     .bind(
       u.title,
@@ -148,6 +160,7 @@ export async function updateWork(db: D1Database, id: string, u: WorkUpdate): Pro
       u.first_line,
       u.content_hash,
       u.updated_at,
+      u.cover_mime ?? null,
       id,
     )
     .run();
@@ -277,6 +290,8 @@ export interface ShelfCard {
   word_count: number;
   first_line: string;
   listed_at: string | null;
+  /** Mime of the cover image if the card should show one; null → CSS cover. */
+  cover_mime: string | null;
 }
 
 function shelfWhere(f: ShelfFilters): { clause: string; args: unknown[] } {
@@ -303,7 +318,7 @@ export async function listShelfWorks(
   const { clause, args } = shelfWhere(f);
   const { results } = await db
     .prepare(
-      `SELECT id, title, pen_name, language, rating, warnings, word_count, first_line, listed_at
+      `SELECT id, title, pen_name, language, rating, warnings, word_count, first_line, listed_at, cover_mime
        FROM works WHERE ${clause}
        ORDER BY listed_at DESC, id DESC LIMIT ?${args.length + 1} OFFSET ?${args.length + 2}`,
     )
@@ -376,6 +391,11 @@ export function bundleKey(id: string): string {
 
 export function pageKey(id: string): string {
   return `works/${id}/index.html`;
+}
+
+/** The author's cover image (bytes served straight from R2 by /w/:id/cover). */
+export function coverKey(id: string): string {
+  return `works/${id}/cover`;
 }
 
 /** Chapter page n (1-based, reading order over standard + back matter). */

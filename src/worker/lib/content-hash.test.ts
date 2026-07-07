@@ -12,7 +12,7 @@ function bundle(overrides: Partial<PublishBundleV1> = {}): PublishBundleV1 {
     language: 'en',
     rating: 'general',
     warnings: [],
-    document: { synopsis: '', pov_character_id: null },
+    document: { synopsis: '', pov_character_id: null, cover_image: null },
     chapters: [
       { id: 'ch1', title: 'One', order: 0, kind: 'standard' },
       { id: 'ch2', title: 'Two', order: 1, kind: 'standard' },

@@ -9,10 +9,10 @@
  * evaporate the whole works/{id}/ prefix by listing, not by fixed keys.
  */
 
-import type { PublishBundleV1 } from '../../format';
+import { decodeCoverImage, type PublishBundleV1 } from '../../format';
 import { renderWorkPages } from '../../render';
 import type { Env } from './env';
-import { bundleKey, chapterKey, chapterPrefix, pageKey, workPrefix } from './db';
+import { bundleKey, chapterKey, chapterPrefix, coverKey, pageKey, workPrefix } from './db';
 
 const HTML_META = { httpMetadata: { contentType: 'text/html; charset=utf-8' } };
 const JSON_META = { httpMetadata: { contentType: 'application/json' } };
@@ -37,8 +37,12 @@ async function deleteKeys(r2: R2Bucket, keys: string[]): Promise<void> {
   }
 }
 
-/** Render all pages for the bundle, write them to R2, drop stale chapters. */
-export async function bakeWork(bundle: PublishBundleV1, id: string, env: Env): Promise<void> {
+/**
+ * Render all pages for the bundle, write them to R2, drop stale chapters, and
+ * sync the cover object. Returns the cover mime (or null) so the caller can
+ * record it on the D1 row — the gallery reads that flag, not the bundle.
+ */
+export async function bakeWork(bundle: PublishBundleV1, id: string, env: Env): Promise<string | null> {
   const pages = renderWorkPages(bundle, { id });
 
   await env.SHELF_R2.put(bundleKey(id), JSON.stringify(bundle), JSON_META);
@@ -53,6 +57,18 @@ export async function bakeWork(bundle: PublishBundleV1, id: string, env: Env): P
 
   const stale = (await listKeys(env.SHELF_R2, chapterPrefix(id))).filter((k) => !current.has(k));
   if (stale.length > 0) await deleteKeys(env.SHELF_R2, stale);
+
+  // Cover: write the decoded bytes when present, or evaporate a stale one on a
+  // re-bake that dropped the cover. The serve route enforces the password gate,
+  // so a locked work's object existing here is safe.
+  const cover = bundle.document.cover_image;
+  if (cover !== null) {
+    const { mime, bytes } = decodeCoverImage(cover);
+    await env.SHELF_R2.put(coverKey(id), bytes, { httpMetadata: { contentType: mime } });
+    return mime;
+  }
+  await env.SHELF_R2.delete(coverKey(id));
+  return null;
 }
 
 /** Delete every R2 object a work owns (bundle, index, all chapter pages). */

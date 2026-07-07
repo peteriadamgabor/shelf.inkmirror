@@ -47,6 +47,7 @@ import {
 } from '../../format';
 import type { Env } from './env';
 import { contentHash } from './content-hash';
+import { sha256Hex } from './crypto';
 import { incrementCounter, setModerationVerdict } from './db';
 
 // Model choices (Claude API, 2026-07): claude-haiku-4-5 is the current
@@ -116,9 +117,23 @@ export function verdictFingerprint(
   contentHash: string,
   rating: string,
   warnings: readonly string[],
+  cover = '',
 ): string {
   const normalized = [...new Set(warnings)].sort().join(',');
-  return `${contentHash}|${rating}|${normalized}`;
+  return `${contentHash}|${rating}|${normalized}|${cover}`;
+}
+
+/**
+ * A short stable token for the cover image (sha256 prefix), or '' when there
+ * is none. Folded into the verdict fingerprint so a verdict earned reviewing
+ * one cover can never be reused for a different one. Defense in depth: an
+ * update already resets moderation on a cover swap, but binding the verdict to
+ * the exact image reviewed is the same guarantee the prose hash gives.
+ */
+export async function coverToken(bundle: PublishBundleV1): Promise<string> {
+  const cover = bundle.document.cover_image;
+  if (cover === null) return '';
+  return (await sha256Hex(cover)).slice(0, 16);
 }
 
 // ---------- verdict ----------
@@ -391,7 +406,7 @@ async function callTool(
   apiKey: string,
   model: string,
   system: string,
-  user: string,
+  user: string | unknown[],
   tool: ToolSpec,
   maxTokens: number,
   signal: AbortSignal,
@@ -409,6 +424,8 @@ async function callTool(
       model,
       max_tokens: maxTokens,
       system,
+      // `user` is a plain string for text passes, or content blocks (image +
+      // text) for the cover vision pass — the Messages API accepts either.
       messages: [{ role: 'user', content: user }],
       tools: [tool],
       tool_choice: { type: 'tool', name: tool.name },
@@ -570,6 +587,89 @@ async function verifierPass(
   return parseVerifierAnswer(input);
 }
 
+// ---------- cover vision pass ----------
+
+const COVER_SYSTEM =
+  'You review the COVER IMAGE of a published work of fiction. You see one ' +
+  'image and answer ONLY the same two questions the text verifier answers, ' +
+  'about the image itself; you never judge artistic merit or theme. Sexual, ' +
+  'nude, and violent imagery is permitted on this platform when the work is ' +
+  'labeled for it; dark and erotic art is legal and welcome. ' +
+  'Question 1 — hardLine: does the image contain sexual content involving a ' +
+  'minor, or does it doxx / target a real, identifiable person for ' +
+  'harassment? A depicted adult, fictional violence, and non-sexual images of ' +
+  'children are NOT hard lines. Give a one-sentence reason describing what you ' +
+  'see. ' +
+  'Question 2 — labels: given the author’s DECLARED rating and warnings, is ' +
+  'the cover honest, or does it show explicit sexual or graphic content that a ' +
+  'general/mature rating does not admit? When under-labeled, suggest honest ' +
+  'labels. Ratings: general (all ages) / mature (16+, non-explicit) / ' +
+  'explicit (18+, explicit sex or violence).';
+
+const COVER_MEDIA_RE = /^data:(image\/[a-z+]+);base64,(.+)$/;
+
+/** One vision call over the cover image, answering the verifier's two questions. */
+async function coverPass(
+  apiKey: string,
+  dataUri: string,
+  rating: Rating,
+  warnings: readonly WarningTag[],
+  signal: AbortSignal,
+): Promise<VerifierAnswer> {
+  const m = COVER_MEDIA_RE.exec(dataUri);
+  if (m === null) throw new Error('cover data URI malformed');
+  const content = [
+    { type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } },
+    {
+      type: 'text',
+      text:
+        `DECLARED rating: ${rating}\n` +
+        `DECLARED warnings: ${warnings.join(', ') || '(none)'}\n\n` +
+        'The image above is the COVER of a published work of fiction. Answer the two questions about the image.',
+    },
+  ];
+  const input = await callTool(
+    apiKey,
+    VERIFIER_MODEL,
+    COVER_SYSTEM,
+    content,
+    VERIFIER_TOOL,
+    VERIFIER_MAX_TOKENS,
+    signal,
+    { thinking: { type: 'disabled' } },
+  );
+  return parseVerifierAnswer(input);
+}
+
+const RATING_RANK: Record<Rating, number> = { general: 0, mature: 1, explicit: 2 };
+
+function strongerRating(a: Rating, b: Rating): Rating {
+  return (RATING_RANK[a] ?? 0) >= (RATING_RANK[b] ?? 0) ? a : b;
+}
+
+/**
+ * Fold the cover verdict into the text verdict. The strictest of the two wins
+ * every axis: any hard line holds, any under-label under-labels, the stronger
+ * suggested rating and the union of warnings carry, and both reasons are kept
+ * (the cover's prefixed so a human can tell which artifact tripped).
+ */
+function mergeAnswers(text: VerifierAnswer, cover: VerifierAnswer | null): VerifierAnswer {
+  if (cover === null) return text;
+  const under = text.labels === 'under-labeled' || cover.labels === 'under-labeled';
+  const reasons: string[] = [];
+  if (text.reason.length > 0) reasons.push(text.reason);
+  if (cover.reason.length > 0) reasons.push(`cover: ${cover.reason}`);
+  return {
+    hardLine: text.hardLine !== 'none' ? text.hardLine : cover.hardLine,
+    labels: under ? 'under-labeled' : 'honest',
+    suggested: {
+      rating: strongerRating(text.suggested.rating, cover.suggested.rating),
+      warnings: [...new Set([...text.suggested.warnings, ...cover.suggested.warnings])],
+    },
+    reason: reasons.join(' '),
+  };
+}
+
 // ---------- the chain ----------
 
 async function moderate(
@@ -586,8 +686,11 @@ async function moderate(
   const aggregate = new Set(flagsByChunk.flat());
   const hasHard = [...aggregate].some((f) => HARD_FLAGS.has(f));
   const uncovered = uncoveredContentFlags(aggregate, bundle.rating, bundle.warnings);
+  const needsTextVerifier = hasHard || uncovered.length > 0;
+  const cover = bundle.document.cover_image;
 
-  if (!hasHard && uncovered.length === 0) {
+  // Fast path: clean text AND no cover to look at → pass on the router alone.
+  if (!needsTextVerifier && cover === null) {
     return {
       outcome: 'pass',
       truncated,
@@ -597,7 +700,16 @@ async function moderate(
     };
   }
 
-  const answer = await verifierPass(apiKey, bundle, chunks, flagsByChunk, uncovered, signal);
+  // The text verifier runs only when the router flagged something; a clean
+  // text with a cover skips it and reviews the image alone.
+  const textAnswer: VerifierAnswer = needsTextVerifier
+    ? await verifierPass(apiKey, bundle, chunks, flagsByChunk, uncovered, signal)
+    : { hardLine: 'none', reason: '', labels: 'honest', suggested: { rating: bundle.rating, warnings: [...bundle.warnings] } };
+  const coverAnswer = cover !== null
+    ? await coverPass(apiKey, cover, bundle.rating, bundle.warnings, signal)
+    : null;
+  const answer = mergeAnswers(textAnswer, coverAnswer);
+
   const base = {
     truncated,
     flaggedChunks,
@@ -747,7 +859,12 @@ export async function runModerationChain(
   // content between scheduling and now — a late verdict never lands on
   // superseded prose.
   const reviewedHash = await contentHash(bundle);
-  const fingerprint = verdictFingerprint(reviewedHash, bundle.rating, bundle.warnings);
+  const fingerprint = verdictFingerprint(
+    reviewedHash,
+    bundle.rating,
+    bundle.warnings,
+    await coverToken(bundle),
+  );
 
   try {
     // Silently a no-op when the work was unpublished mid-run — the UPDATE

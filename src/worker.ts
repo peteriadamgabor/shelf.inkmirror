@@ -44,6 +44,7 @@ import { handleLetterSubmit, letterPage } from './worker/routes/letters';
 import { handleUnlock } from './worker/routes/unlock';
 import { handleAdmin } from './worker/routes/admin';
 import { handleRead, handleReadChapter, notFoundPage } from './worker/routes/read';
+import { handleCover } from './worker/routes/cover';
 import { langForRequest } from './worker/i18n';
 import { landingPage } from './worker/pages/landing';
 import { shelfPage } from './worker/pages/shelf-page';
@@ -184,7 +185,7 @@ async function route(
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
 
-  const readMatch = path.match(/^\/w\/([^/]{1,64})(\/(manage|report|letter))?$/);
+  const readMatch = path.match(/^\/w\/([^/]{1,64})(\/(manage|report|letter|cover))?$/);
   if (readMatch && method === 'GET') {
     const [, id, , sub] = readMatch;
     if (!WORK_ID_RE.test(id ?? '')) return notFoundPage(langForRequest(request, url));
@@ -192,6 +193,7 @@ async function route(
     if (sub === 'manage') return managePage(workId);
     if (sub === 'report') return await reportPage(request, env, workId);
     if (sub === 'letter') return await letterPage(request, env, workId);
+    if (sub === 'cover') return await handleCover(request, env, workId);
     return await handleRead(request, env, ctx, workId);
   }
 

@@ -112,7 +112,7 @@ export async function handlePublish(
   const nowIso = now.toISOString();
   const expiresAt = new Date(now.getTime() + WORK_TTL_MS).toISOString();
 
-  await bakeWork(clean, id, env);
+  const coverMime = await bakeWork(clean, id, env);
 
   await insertWork(env.SHELF_DB, {
     id,
@@ -129,6 +129,7 @@ export async function handlePublish(
     updated_at: nowIso,
     expires_at: expiresAt,
     password_hash: passwordHash,
+    cover_mime: coverMime,
   });
 
   // Phase 2 shadow chain: content is already stored and baked — the chain

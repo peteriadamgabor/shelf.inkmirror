@@ -185,7 +185,7 @@ class FakeStatement {
       return { success: true };
     }
     if (s.includes('INSERT INTO works')) {
-      const [id, secret_hash, title, pen_name, language, rating, warnings, word_count, first_line, content_hash, created_at, updated_at, expires_at, password_hash] = a;
+      const [id, secret_hash, title, pen_name, language, rating, warnings, word_count, first_line, content_hash, created_at, updated_at, expires_at, password_hash, cover_mime] = a;
       this.works.set(String(id), {
         id: String(id),
         secret_hash: String(secret_hash),
@@ -213,6 +213,7 @@ class FakeStatement {
         listed_at: null,
         listing_verdict: null,
         verdict_fingerprint: null,
+        cover_mime: cover_mime === undefined || cover_mime === null ? null : String(cover_mime),
       });
       return { success: true };
     }
@@ -276,9 +277,9 @@ class FakeStatement {
     }
     if (s.includes('UPDATE works SET title')) {
       // SET title=?1, pen_name=?2, language=?3, rating=?4, warnings=?5,
-      //   word_count=?6, first_line=?7, content_hash=?8, updated_at=?9
-      //   [, moderation/listing reset...] WHERE id=?10
-      const row = this.works.get(String(a[9]));
+      //   word_count=?6, first_line=?7, content_hash=?8, updated_at=?9,
+      //   cover_mime=?10 [, moderation/listing reset...] WHERE id=?11
+      const row = this.works.get(String(a[10]));
       if (row) {
         row.title = String(a[0]);
         row.pen_name = String(a[1]);
@@ -289,6 +290,7 @@ class FakeStatement {
         row.first_line = String(a[6]);
         row.content_hash = String(a[7]);
         row.updated_at = String(a[8]);
+        row.cover_mime = a[9] === undefined || a[9] === null ? null : String(a[9]);
         if (s.includes('moderation_verdict = NULL')) {
           // resetModeration: stale verdict cleared + listing dropped.
           row.moderation_verdict = null;
@@ -488,7 +490,7 @@ class FakeStatement {
         .map((w) => ({
           id: w.id, title: w.title, pen_name: w.pen_name, language: w.language,
           rating: w.rating, warnings: w.warnings, word_count: w.word_count,
-          first_line: w.first_line, listed_at: w.listed_at,
+          first_line: w.first_line, listed_at: w.listed_at, cover_mime: w.cover_mime ?? null,
         }) as T);
       return { results };
     }
@@ -619,7 +621,7 @@ function makeBundle(overrides: Partial<PublishBundleV1> = {}): PublishBundleV1 {
     language: 'en',
     rating: 'general',
     warnings: [],
-    document: { synopsis: '', pov_character_id: null },
+    document: { synopsis: '', pov_character_id: null, cover_image: null },
     chapters: [{ id: 'ch1', title: 'One', order: 0, kind: 'standard' }],
     blocks: [
       {

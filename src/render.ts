@@ -266,6 +266,8 @@ main{max-width:var(--rmw);margin:0 auto;padding:0 1.25rem 4rem;position:relative
 .cover-back{padding:1.4rem 0 0;font-family:var(--sans);font-size:.85rem}
 .cover-back a{color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:.4rem;transition:color .15s,gap .15s}
 .cover-back a:hover,.cover-back a:focus{color:var(--violet);gap:.55rem}
+.cover-hero{margin:1.75rem auto .5rem;max-width:min(320px,72%)}
+.cover-hero img{display:block;width:100%;height:auto;border-radius:10px;box-shadow:0 8px 30px rgba(30,22,14,.22)}
 .work-head{padding:2rem 0 1rem;text-align:center;border-bottom:1px solid var(--line);margin-bottom:2.5rem}
 .work-title{font-family:var(--serif);font-weight:600;font-size:2.1rem;line-height:1.2;margin:0 0 .35rem}
 .byline{color:var(--muted);margin:0 0 1rem;font-size:.95rem}
@@ -430,6 +432,17 @@ function chapterSection(ch: PublishedChapter, blocks: PublishedBlock[], ctx: Ren
     .filter((c) => c.length > 0)
     .join(' ');
   return `<section class="${classes}">${title}\n${body}</section>`;
+}
+
+/**
+ * The author's cover image, above the title on the cover/single page. Bytes
+ * are served (and password-gated) by /w/:id/cover, so this only references
+ * the URL — the baked HTML stays small and the image is cached separately.
+ * Decorative alt: the title text follows immediately.
+ */
+function coverHero(bundle: PublishBundleV1, id: string): string {
+  if (bundle.document.cover_image === null) return '';
+  return `<figure class="cover-hero"><img src="/w/${escapeHtml(id)}/cover" alt="" loading="eager"></figure>`;
 }
 
 function workHeader(bundle: PublishBundleV1, lang: Lang): string {
@@ -744,6 +757,7 @@ el.hidden=false;
     : '';
 
   const pageBody = `<p class="cover-back"><a href="/shelf">&larr; ${escapeHtml(t(lang, 'read.nav.shelf'))}</a></p>
+${coverHero(bundle, id)}
 ${workHeader(bundle, lang)}
 ${frontHtml}
 ${continueSlot}
@@ -828,6 +842,7 @@ export function renderWorkPages(bundle: PublishBundleV1, meta: PageMeta): BakedP
     const chapterHtml = only ? chapterSection(only, blocksByChapter.get(only.id) ?? [], ctx) : '';
     const words = only ? chapterWordCount(blocksByChapter.get(only.id) ?? []) : 0;
     const pageBody = `<p class="cover-back"><a href="/shelf">&larr; ${escapeHtml(t(lang, 'read.nav.shelf'))}</a></p>
+${coverHero(bundle, meta.id)}
 ${workHeader(bundle, lang)}
 ${chapterHtml}
 ${workFooter(bundle, meta, lang)}`;

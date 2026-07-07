@@ -102,6 +102,15 @@ export interface PublishedDocument {
   synopsis: string;
   /** Dialogue from this character renders right-aligned ("me" vs "them"). */
   pov_character_id: string | null;
+  /**
+   * Optional book-cover image as a `data:image/(png|jpeg|webp);base64,…` URI,
+   * downscaled by the client before publish. Shown on the gallery card and at
+   * the top of the work's cover page. A new public surface: on the public
+   * shelf (listed works only) it is vision-moderated at listing time; on a
+   * link-shared work it rides as unmoderated plumbing, same as the prose.
+   * NULL when the author set no cover.
+   */
+  cover_image: string | null;
 }
 
 export interface PublishBundleV1 {
@@ -138,6 +147,44 @@ const MAX_CHARACTER_NAME = 200;
 const MAX_SCENE_FIELD = 500;
 const MAX_PARENTHETICAL = 500;
 const MAX_LANGUAGE = 35;
+/** Decoded cover bytes cap. The client downscales well below this (~150 KB). */
+export const MAX_COVER_BYTES = 400_000;
+/** The only image encodings a cover may use — all browser-native, all safe to <img>. */
+const COVER_MIME_SET = new Set<string>(['image/png', 'image/jpeg', 'image/webp']);
+const COVER_DATA_URI_RE = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
+
+/**
+ * Validate an optional cover image. Returns the clean data URI, or null when
+ * absent. THROWS on a malformed non-null value — a cover that won't decode is
+ * a client bug worth failing loudly on, not silently dropping. Never runs
+ * atob: the decoded length is derived from the base64 length so a hostile
+ * payload can't force a huge allocation just to be rejected.
+ */
+export function parseCoverImage(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'string') throw new Error('cover_image must be a data URI string');
+  const m = COVER_DATA_URI_RE.exec(raw);
+  if (m === null) throw new Error('cover_image must be a base64 data URI (png/jpeg/webp)');
+  const mime = m[1] ?? '';
+  const b64 = m[2] ?? '';
+  if (!COVER_MIME_SET.has(mime)) throw new Error(`cover_image mime "${mime}" not allowed`);
+  const padding = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+  const bytes = Math.floor((b64.length * 3) / 4) - padding;
+  if (bytes <= 0) throw new Error('cover_image is empty');
+  if (bytes > MAX_COVER_BYTES) throw new Error('cover_image too large');
+  return raw;
+}
+
+/** Split a validated cover data URI into its mime + raw bytes for R2 storage. */
+export function decodeCoverImage(dataUri: string): { mime: string; bytes: Uint8Array } {
+  const m = COVER_DATA_URI_RE.exec(dataUri);
+  if (m === null) throw new Error('not a cover data URI');
+  const mime = m[1] ?? 'image/jpeg';
+  const binary = atob(m[2] ?? '');
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return { mime, bytes };
+}
 
 const RATING_SET = new Set<string>(RATINGS);
 const WARNING_SET = new Set<string>(WARNING_TAGS);
@@ -184,6 +231,7 @@ export function validatePublishBundle(bundle: PublishBundleV1): void {
   }
 
   if (!isPlainObject(bundle.document)) throw new Error('document missing');
+  parseCoverImage((bundle.document as Record<string, unknown>)['cover_image']); // throws on a malformed cover
   if (typeof bundle.document.synopsis !== 'string' || bundle.document.synopsis.length > MAX_SYNOPSIS) {
     throw new Error('document.synopsis invalid');
   }
@@ -418,6 +466,7 @@ export function sanitizePublishBundle(x: unknown): PublishBundleV1 {
   const rawPov = doc['pov_character_id'];
   const pov_character_id =
     typeof rawPov === 'string' && characterIds.has(rawPov) ? rawPov : null;
+  const cover_image = parseCoverImage(doc['cover_image']);
 
   const chaptersRaw = raw['chapters'];
   if (!Array.isArray(chaptersRaw) || chaptersRaw.length === 0) throw new Error('chapters missing or empty');
@@ -490,7 +539,7 @@ export function sanitizePublishBundle(x: unknown): PublishBundleV1 {
     language,
     rating: rating as Rating,
     warnings,
-    document: { synopsis, pov_character_id },
+    document: { synopsis, pov_character_id, cover_image },
     chapters,
     blocks,
     characters,

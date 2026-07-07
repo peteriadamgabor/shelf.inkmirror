@@ -30,7 +30,7 @@ const WORKS_COLUMNS = [
   'word_count', 'first_line', 'status', 'listed', 'password_hash', 'views',
   'letters_open', 'report_count', 'created_at', 'updated_at', 'expires_at',
   'removed_at', 'moderation_verdict', 'moderation_at', 'content_hash',
-  'listing_state', 'listed_at', 'listing_verdict', 'verdict_fingerprint',
+  'listing_state', 'listed_at', 'listing_verdict', 'verdict_fingerprint', 'cover_mime',
 ] as const;
 const REPORTS_COLUMNS = ['id', 'work_id', 'reason', 'message', 'created_at'] as const;
 const LETTERS_COLUMNS = ['id', 'work_id', 'body', 'contact', 'created_at'] as const;

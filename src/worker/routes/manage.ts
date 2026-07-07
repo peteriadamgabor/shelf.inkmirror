@@ -11,13 +11,14 @@
  * passes the password gate.
  */
 
-import { isPublishBundle, sanitizePublishBundle, type PublishBundleV1 } from '../../format';
+import { decodeCoverImage, isPublishBundle, sanitizePublishBundle, type PublishBundleV1 } from '../../format';
 import { countWords, firstLine } from '../../render';
 import type { Env } from '../lib/env';
 import { constantTimeEqualHex, sha256Hex } from '../lib/crypto';
 import { contentHash } from '../lib/content-hash';
 import { bakeWork, deleteWorkObjects } from '../lib/bake';
 import {
+  coverKey,
   deleteLetter,
   deleteWork,
   delistWork,
@@ -269,6 +270,34 @@ async function lettersOpen(request: Request, env: Env, row: WorkRow): Promise<Re
   return Response.json({ ok: true, lettersOpen: open });
 }
 
+/**
+ * Did the cover survive an update byte-for-byte? Gated so a text-only update
+ * (the common case) costs no R2 read: only when either side actually has a
+ * cover do we fetch the stored bytes and compare. MUST be called before
+ * bakeWork overwrites the object. A missing old object, or any byte
+ * difference, counts as changed — the safe direction (forces re-review).
+ */
+async function coverUnchanged(
+  env: Env,
+  id: string,
+  oldMime: string | null,
+  newCover: string | null,
+): Promise<boolean> {
+  const hadCover = oldMime !== null;
+  const hasCover = newCover !== null;
+  if (!hadCover && !hasCover) return true;
+  if (hadCover !== hasCover) return false;
+  const old = await env.SHELF_R2.get(coverKey(id));
+  if (old === null) return false;
+  const oldBytes = new Uint8Array(await old.arrayBuffer());
+  const { bytes: newBytes } = decodeCoverImage(newCover as string);
+  if (oldBytes.length !== newBytes.length) return false;
+  for (let i = 0; i < oldBytes.length; i++) {
+    if (oldBytes[i] !== newBytes[i]) return false;
+  }
+  return true;
+}
+
 async function update(
   request: Request,
   env: Env,
@@ -307,13 +336,19 @@ async function update(
   // unknown, so treat as changed. Labels are part of the artifact because a
   // verdict answers "is this honestly labeled?" — a relabel on identical
   // prose is a different artifact and must be re-judged.
+  // The cover is a fourth artifact facet, but it is NOT in content_hash (that
+  // stays prose-only for tombstones). Compared here — before bakeWork
+  // overwrites the object — so an author who swaps only the cover on a listed
+  // work is delisted and must re-list, where the new image is vision-reviewed.
+  const coverSame = await coverUnchanged(env, row.id, row.cover_mime, clean.document.cover_image);
   const artifactUnchanged =
+    coverSame &&
     row.content_hash !== null &&
     row.content_hash === bundleHash &&
     row.rating === clean.rating &&
     row.warnings === JSON.stringify(clean.warnings);
 
-  await bakeWork(clean, row.id, env);
+  const coverMime = await bakeWork(clean, row.id, env);
 
   // A real change drops any listing (critical: a listed work cannot be
   // mutated out from under the review that approved it) and clears the stale
@@ -331,6 +366,7 @@ async function update(
     first_line: firstLine(clean),
     content_hash: bundleHash,
     updated_at: updatedAt,
+    cover_mime: coverMime,
     resetModeration: !artifactUnchanged,
   });
 

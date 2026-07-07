@@ -99,6 +99,10 @@ body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opa
   text-shadow:0 1px 2px rgb(0 0 0 / .25);overflow-wrap:break-word;display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
 .cover-pen{position:relative;z-index:1;font-family:var(--sans);font-size:.6rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;
   color:rgb(255 255 255 / .85);overflow-wrap:break-word}
+/* author cover art: fills the book, keeps the spine + sheen, replaces the text */
+.cover-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:inherit;z-index:0}
+.cover-has-img::before{z-index:1}
+.cover-has-img .cover-title,.cover-has-img .cover-pen{display:none}
 .card-title{font-family:var(--serif);font-weight:600;font-size:1rem;line-height:1.3;margin:.75rem 0 0;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .card-first{font-family:var(--serif);font-style:italic;color:var(--muted);font-size:.88rem;line-height:1.45;margin:.3rem 0 0;
@@ -194,10 +198,18 @@ function card(w: ShelfCard, lang: Lang): string {
     w.language.toLowerCase() !== 'en'
       ? `<span class="lang-tag">${escapeHtml(w.language.toUpperCase())}</span>`
       : '';
+  // A real cover image lays over the generated gradient (which stays as the
+  // load/broken fallback and frames a transparent PNG). Author art wins the
+  // shelf; the CSS cover carries works that never set one.
+  const coverImg =
+    w.cover_mime !== null
+      ? `<img class="cover-img" src="/w/${escapeHtml(w.id)}/cover" alt="" loading="lazy" decoding="async">`
+      : '';
   return `<a class="wcard" href="/w/${escapeHtml(w.id)}">
-<div class="cover" style="background:linear-gradient(160deg,${from},${to})" aria-hidden="true">
+<div class="cover${w.cover_mime !== null ? ' cover-has-img' : ''}" style="background:linear-gradient(160deg,${from},${to})" aria-hidden="true">
 <span class="cover-title">${escapeHtml(w.title)}</span>
 <span class="cover-pen">${escapeHtml(w.pen_name)}</span>
+${coverImg}
 </div>
 <h2 class="card-title">${escapeHtml(w.title)}</h2>
 ${firstLine}

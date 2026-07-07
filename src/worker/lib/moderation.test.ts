@@ -11,8 +11,10 @@ import {
   chainDailyCap,
   chainRunsKey,
   chunkBundle,
+  coverToken,
   parseModerationVerdict,
   uncoveredContentFlags,
+  verdictFingerprint,
   type ModerationChunk,
   type RouterFlag,
 } from './moderation';
@@ -33,7 +35,7 @@ function bundleWith(blocks: PublishedBlock[], chapters?: PublishBundleV1['chapte
     language: 'en',
     rating: 'general',
     warnings: [],
-    document: { synopsis: '', pov_character_id: null },
+    document: { synopsis: '', pov_character_id: null, cover_image: null },
     chapters: chapters ?? [{ id: 'ch1', title: 'One', order: 0, kind: 'standard' }],
     blocks,
     characters: [],
@@ -43,6 +45,22 @@ function bundleWith(blocks: PublishedBlock[], chapters?: PublishBundleV1['chapte
 function textBlock(id: string, chapterId: string, order: number, content: string): PublishedBlock {
   return { id, chapter_id: chapterId, type: 'text', content, order, metadata: { type: 'text' } };
 }
+
+describe('cover fingerprint binding', () => {
+  it('a cover changes the verdict fingerprint, so a verdict cannot be reused across covers', async () => {
+    const noCover = bundleWith([textBlock('b1', 'ch1', 0, 'hello world')]);
+    const withA = { ...noCover, document: { ...noCover.document, cover_image: 'data:image/png;base64,AAAA' } };
+    const withB = { ...noCover, document: { ...noCover.document, cover_image: 'data:image/png;base64,BBBB' } };
+
+    const fpNone = verdictFingerprint('h', 'general', [], await coverToken(noCover));
+    const fpA = verdictFingerprint('h', 'general', [], await coverToken(withA));
+    const fpB = verdictFingerprint('h', 'general', [], await coverToken(withB));
+
+    expect(await coverToken(noCover)).toBe('');
+    expect(fpA).not.toBe(fpNone); // adding a cover changes the fingerprint
+    expect(fpA).not.toBe(fpB); // a different cover changes it again
+  });
+});
 
 describe('moderation chunking', () => {
   it('concatenates blocks in reading order and keeps block-id boundaries', () => {

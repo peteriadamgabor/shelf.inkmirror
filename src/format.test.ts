@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_COVER_BYTES,
   PUBLISH_BUNDLE_KIND,
   PUBLISH_BUNDLE_VERSION,
+  decodeCoverImage,
   isPublishBundle,
+  parseCoverImage,
   sanitizePublishBundle,
   validatePublishBundle,
   type PublishBundleV1,
 } from './format';
+
+/** A valid 1×1 PNG as a base64 data URI. */
+const PNG_1PX =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
 
 function minimalBundle(): PublishBundleV1 {
   return {
@@ -18,7 +25,7 @@ function minimalBundle(): PublishBundleV1 {
     language: 'hu',
     rating: 'general',
     warnings: [],
-    document: { synopsis: '', pov_character_id: null },
+    document: { synopsis: '', pov_character_id: null, cover_image: null },
     chapters: [{ id: 'ch1', title: 'Egy', order: 0, kind: 'standard' }],
     blocks: [
       {
@@ -33,6 +40,56 @@ function minimalBundle(): PublishBundleV1 {
     characters: [],
   };
 }
+
+describe('parseCoverImage', () => {
+  it('accepts a valid png/jpeg/webp data URI and returns it verbatim', () => {
+    expect(parseCoverImage(PNG_1PX)).toBe(PNG_1PX);
+    expect(parseCoverImage(null)).toBeNull();
+    expect(parseCoverImage(undefined)).toBeNull();
+  });
+  it('rejects a non-data-URI string', () => {
+    expect(() => parseCoverImage('https://evil.example/x.png')).toThrow();
+    expect(() => parseCoverImage('<img src=x>')).toThrow();
+  });
+  it('rejects a disallowed mime (gif / svg — svg can carry script)', () => {
+    expect(() => parseCoverImage('data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=')).toThrow();
+    expect(() => parseCoverImage('data:image/gif;base64,R0lGODlhAQABAAAAACw=')).toThrow();
+  });
+  it('rejects an oversized cover without decoding it', () => {
+    // A base64 string whose decoded length exceeds the cap.
+    const huge = 'data:image/png;base64,' + 'A'.repeat(Math.ceil((MAX_COVER_BYTES + 1000) * 4 / 3));
+    expect(() => parseCoverImage(huge)).toThrow(/too large/);
+  });
+  it('rejects a non-string', () => {
+    expect(() => parseCoverImage(42)).toThrow();
+  });
+});
+
+describe('decodeCoverImage', () => {
+  it('splits a data URI into mime + bytes', () => {
+    const { mime, bytes } = decodeCoverImage(PNG_1PX);
+    expect(mime).toBe('image/png');
+    // A real PNG starts with the 8-byte signature 0x89 P N G.
+    expect([bytes[0], bytes[1], bytes[2], bytes[3]]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+  });
+});
+
+describe('cover_image through the bundle', () => {
+  it('sanitize carries a valid cover through, and validate accepts it', () => {
+    const raw = { ...minimalBundle(), document: { synopsis: '', pov_character_id: null, cover_image: PNG_1PX } };
+    const clean = sanitizePublishBundle(raw);
+    expect(clean.document.cover_image).toBe(PNG_1PX);
+    expect(() => validatePublishBundle(clean)).not.toThrow();
+  });
+  it('sanitize rejects a malformed cover loudly (a client bug, not silently dropped)', () => {
+    const raw = { ...minimalBundle(), document: { synopsis: '', pov_character_id: null, cover_image: 'data:text/html,<script>' } };
+    expect(() => sanitizePublishBundle(raw)).toThrow();
+  });
+  it('a missing cover_image sanitizes to null', () => {
+    const raw = { ...minimalBundle(), document: { synopsis: '', pov_character_id: null } };
+    expect(sanitizePublishBundle(raw).document.cover_image).toBeNull();
+  });
+});
 
 describe('isPublishBundle', () => {
   it('accepts the envelope', () => {
