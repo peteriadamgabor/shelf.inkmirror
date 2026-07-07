@@ -127,6 +127,7 @@ export function termsPage(): Response {
       title: 'Terms of Service — The Shelf',
       css: TERMS_CSS,
       body: `<div class="page">
+<p class="topback"><a href="/">&larr; The Shelf</a></p>
 <nav class="lang-switch" aria-label="Language"><a href="#en">English</a><a href="#hu">Magyar</a></nav>
 ${EN}
 <hr class="hairline">

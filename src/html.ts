@@ -98,6 +98,10 @@ a{color:var(--violet)}
 /** Chrome layer for shell pages (not the reading page). */
 export const SHELL_CSS = `
 .page{max-width:42rem;margin:0 auto;padding:3.5rem 1.25rem 4rem}
+.topback{margin:0 0 1.6rem;font-size:.9rem;font-family:var(--sans)}
+.topback a{color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:.4rem;
+  transition:color .15s,gap .15s}
+.topback a:hover,.topback a:focus{color:var(--violet);gap:.55rem}
 .page h1,.page h2,.page h3{font-family:var(--serif);line-height:1.25;font-weight:600}
 .page h1{font-size:2rem;margin:0 0 .5rem}
 .page h2{font-size:1.35rem;margin:2.5rem 0 .6rem}

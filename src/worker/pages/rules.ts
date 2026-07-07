@@ -154,6 +154,7 @@ export function rulesPage(): Response {
       title: 'House rules — The Shelf',
       css: RULES_CSS,
       body: `<div class="page">
+<p class="topback"><a href="/">&larr; The Shelf</a></p>
 <nav class="lang-switch" aria-label="Language"><a href="#en">English</a><a href="#hu">Magyar</a></nav>
 ${EN}
 <hr class="hairline">
