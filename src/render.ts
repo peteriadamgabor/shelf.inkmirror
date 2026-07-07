@@ -507,6 +507,36 @@ seg.querySelectorAll('button').forEach(function(b){b.setAttribute('aria-pressed'
 }
 })();`;
 
+/**
+ * Touch navigation: swipe left/right to turn the page (prev/next chapter).
+ * Reads the rel=prev / rel=next anchors already in the chapter nav, so it is a
+ * no-op on the cover and single-chapter works. Honours RTL (forward is the
+ * other way), ignores vertical scrolls and swipes that begin on the settings
+ * panel, and never fires when the reader is selecting text.
+ */
+const READING_SWIPE_JS = `(function(){
+if(!('ontouchstart' in window))return;
+var sx=0,sy=0,st=0,ok=false;
+function href(sel){var a=document.querySelector(sel);return a&&a.tagName==='A'?a.getAttribute('href'):null;}
+document.addEventListener('touchstart',function(e){
+if(e.touches.length!==1){ok=false;return;}
+var tg=e.target;
+if(tg&&tg.closest&&tg.closest('.rs-panel,.rs-toggle,a,button,input,textarea,select')){ok=false;return;}
+sx=e.touches[0].clientX;sy=e.touches[0].clientY;st=Date.now();ok=true;
+},{passive:true});
+document.addEventListener('touchend',function(e){
+if(!ok)return;ok=false;
+if(String(document.getSelection?document.getSelection():'').length>0)return;
+var t=e.changedTouches[0],dx=t.clientX-sx,dy=t.clientY-sy;
+if(Date.now()-st>700)return;
+if(Math.abs(dx)<70||Math.abs(dx)<Math.abs(dy)*1.7)return;
+var rtl=document.documentElement.getAttribute('dir')==='rtl';
+var forward=rtl?dx>0:dx<0;
+var url=forward?href('a[rel="next"]'):href('a[rel="prev"]');
+if(url)location.href=url;
+},{passive:true});
+})();`;
+
 /** Wrap page body in the full HTML document, with the age gate when rated. */
 function bakedPage(
   bundle: PublishBundleV1,
@@ -518,7 +548,7 @@ ${opts.body}
 </main>`;
 
   const lang = langForWork(bundle.language);
-  const js = `${gated ? AGE_GATE_JS : ''}${opts.script ?? ''}${READING_SETTINGS_JS}`;
+  const js = `${gated ? AGE_GATE_JS : ''}${opts.script ?? ''}${READING_SETTINGS_JS}${READING_SWIPE_JS}`;
   const script = `<script>${js}</script>\n`;
 
   const rtl = RTL_LANGUAGES.has(bundle.language.toLowerCase().split('-')[0] ?? '');
@@ -595,7 +625,8 @@ function coverPage(
     .map((ch, i) => {
       const n = i + 1;
       const words = chapterWordCount(blocksByChapter.get(ch.id) ?? []);
-      return `<li><a href="/w/${id}/${n}"><span class="toc-num nums">${n}</span><span class="toc-label">${escapeHtml(labels[i] ?? chapterLabel(ch, n, lang))}</span><span class="toc-words nums">${words.toLocaleString('en-US')} ${escapeHtml(wordsLabel)}</span></a></li>`;
+      // rel="next" on the first entry lets a forward swipe on the cover open chapter 1.
+      return `<li><a href="/w/${id}/${n}"${n === 1 ? ' rel="next"' : ''}><span class="toc-num nums">${n}</span><span class="toc-label">${escapeHtml(labels[i] ?? chapterLabel(ch, n, lang))}</span><span class="toc-words nums">${words.toLocaleString('en-US')} ${escapeHtml(wordsLabel)}</span></a></li>`;
     })
     .join('\n');
   const toc = body.length > 0

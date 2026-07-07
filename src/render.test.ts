@@ -333,7 +333,11 @@ describe('renderWorkPages — chaptered reading', () => {
     const page3 = pages.chapters[2] ?? '';
     expect(page1).toContain(`href="/w/${META.id}" rel="prev"`);
     expect(page3).toContain(`href="/w/${META.id}#toc">Contents</a>`);
-    expect(page3).not.toContain('rel="next"');
+    // The last page's next slot is an empty span, not a next anchor. (Check the
+    // nav element specifically — the swipe script mentions the rel="next"
+    // selector in a string, so a bare substring check would false-positive.)
+    expect(page3).toContain('<span class="nav-next"');
+    expect(page3).not.toContain('<a class="nav-next"');
     expect(page3).toContain(`localStorage.setItem('shelf.pos.'+"${META.id}",String(3))`);
   });
 
