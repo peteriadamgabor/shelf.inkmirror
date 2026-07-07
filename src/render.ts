@@ -245,7 +245,24 @@ if(back)back.addEventListener('click',function(e){e.preventDefault();history.bac
 // ---------- page CSS (prose layer on top of THEME_CSS) ----------
 
 const READING_CSS = `
-main{max-width:42rem;margin:0 auto;padding:0 1.25rem 4rem}
+/* Reader-adjustable typography. The settings panel writes these custom
+   properties on <html>; prose sizes are relative to --rfs so one control
+   scales everything. Defaults reproduce the original fixed values. */
+:root{--rfs:1;--rmw:42rem;--rlh:1.7;--rfam:var(--serif)}
+:root[data-family="sans"]{--rfam:var(--sans)}
+/* "Readable" = a dyslexia-comfort mode using system fonts (no webfont to
+   download): sans-serif, generous letter + word spacing, and left-aligned,
+   never-justified prose — the evidence-based aids (Rello & Baeza-Yates).
+   Pairs with the Airy line-spacing and Narrow width controls for the full
+   effect. */
+:root[data-family="readable"]{--rfam:var(--sans);letter-spacing:.035em;word-spacing:.08em}
+:root[data-family="readable"] .para,:root[data-family="readable"] .dlg-text{text-align:left;hyphens:none}
+body{position:relative}
+/* A whisper of paper grain so the cream surface has depth, not flatness. */
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.5;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.028'/%3E%3C/svg%3E")}
+main{max-width:var(--rmw);margin:0 auto;padding:0 1.25rem 4rem;position:relative;z-index:1;
+  font-family:var(--rfam);font-size:calc(1.0625rem * var(--rfs));line-height:var(--rlh)}
 .work-head{padding:3.5rem 0 1rem;text-align:center;border-bottom:1px solid var(--line);margin-bottom:2.5rem}
 .work-title{font-family:var(--serif);font-weight:600;font-size:2.1rem;line-height:1.2;margin:0 0 .35rem}
 .byline{color:var(--muted);margin:0 0 1rem;font-size:.95rem}
@@ -266,7 +283,7 @@ main{max-width:42rem;margin:0 auto;padding:0 1.25rem 4rem}
 .ch-center .para{text-align:center}
 .ch-cover .para{font-size:1.35rem;line-height:1.5}
 .para{
-  font-family:var(--serif);font-size:1.0625rem;line-height:1.7;
+  font-family:inherit;font-size:1em;line-height:inherit;
   margin:0 0 1.1em;white-space:pre-wrap;overflow-wrap:break-word;
 }
 .scene{margin:2.4em 0 1.2em}
@@ -277,7 +294,7 @@ main{max-width:42rem;margin:0 auto;padding:0 1.25rem 4rem}
 }
 .dlg{margin:0 0 1.1em;padding-left:.9rem;border-left:2px solid color-mix(in srgb,var(--accent) 55%,transparent);--accent:var(--line)}
 .paren{font-family:var(--serif);font-style:italic;font-size:.9rem;color:var(--muted);margin:0 0 .2em}
-.dlg-text{font-family:var(--serif);font-size:1.0625rem;line-height:inherit;white-space:pre-wrap;overflow-wrap:break-word}
+.dlg-text{font-family:inherit;font-size:1em;line-height:inherit;white-space:pre-wrap;overflow-wrap:break-word}
 .work-foot{margin-top:3.5rem;padding:0 0 .75rem;text-align:center;font-family:var(--sans);font-size:.8rem;color:var(--muted)}
 .foot-mark{font-family:var(--serif);font-size:1rem;color:var(--muted);opacity:.7;margin-bottom:1.1rem}
 .foot-meta{margin:0 0 .4rem}
@@ -329,6 +346,35 @@ main{max-width:42rem;margin:0 auto;padding:0 1.25rem 4rem}
 .ch-nav .nav-next{text-align:right}
 .ch-nav-top{margin:.9rem 0 0}
 .ch-nav-bottom{border-top:1px solid var(--line);margin-top:3rem;padding-top:1.2rem}
+
+/* ---------- reading settings ---------- */
+.rs-toggle{position:fixed;right:1rem;bottom:1rem;z-index:20;width:2.9rem;height:2.9rem;
+  border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--ink);
+  font:600 1.05rem/1 var(--serif);cursor:pointer;box-shadow:0 4px 14px rgb(0 0 0 / .12);
+  transition:transform .12s,box-shadow .15s}
+.rs-toggle:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgb(0 0 0 / .16)}
+.rs-toggle:focus-visible{outline:2px solid var(--violet);outline-offset:2px}
+.rs-panel{position:fixed;right:1rem;bottom:4.4rem;z-index:20;width:17rem;max-width:calc(100vw - 2rem);
+  background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:1rem 1.1rem 1.15rem;
+  box-shadow:0 14px 40px rgb(0 0 0 / .18);font-family:var(--sans);
+  transform-origin:bottom right;transition:opacity .14s,transform .14s}
+.rs-panel[hidden]{display:none}
+.rs-panel.closing{opacity:0;transform:scale(.96)}
+.rs-h{font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:.9rem 0 .4rem}
+.rs-h:first-child{margin-top:0}
+.rs-row{display:flex;gap:.4rem}
+.rs-seg{flex:1;display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.rs-seg button{flex:1;appearance:none;border:0;background:transparent;color:var(--ink);
+  font:600 .82rem/1 var(--sans);padding:.5rem .3rem;cursor:pointer;transition:background .12s}
+.rs-seg button+button{border-left:1px solid var(--line)}
+.rs-seg button:hover{background:color-mix(in srgb,var(--violet) 9%,transparent)}
+.rs-seg button[aria-pressed="true"]{background:var(--violet);color:#fff}
+.rs-size button{font-family:var(--serif)}
+.rs-size .s-sm{font-size:.8rem}.rs-size .s-lg{font-size:1.15rem}
+.rs-reset{margin-top:.9rem;width:100%;appearance:none;border:1px solid var(--line);border-radius:9px;
+  background:transparent;color:var(--muted);font:600 .75rem/1 var(--sans);padding:.5rem;cursor:pointer}
+.rs-reset:hover{color:var(--violet);border-color:var(--violet)}
+@media (prefers-reduced-motion: reduce){.rs-toggle,.rs-panel{transition:none}}
 `;
 
 // ---------- shared page pieces ----------
@@ -385,6 +431,82 @@ function workFooter(bundle: PublishBundleV1, meta: PageMeta, lang: Lang): string
 </footer>`;
 }
 
+/**
+ * Applied in <head> before first paint so a reader's saved preferences never
+ * flash the defaults first. Purely reads localStorage → sets attrs/vars on
+ * <html>. Wrapped in try/catch (private mode / disabled storage).
+ */
+const READING_SETTINGS_EARLY = `(function(){try{var d=document.documentElement,s=localStorage;
+var fs=s.getItem('shelf.rs.size');if(fs)d.style.setProperty('--rfs',fs);
+var fam=s.getItem('shelf.rs.family');if(fam&&fam!=='serif')d.setAttribute('data-family',fam);
+var w=s.getItem('shelf.rs.width');if(w)d.style.setProperty('--rmw',w);
+var lh=s.getItem('shelf.rs.lh');if(lh)d.style.setProperty('--rlh',lh);
+var th=s.getItem('shelf.rs.theme');if(th&&th!=='auto')d.setAttribute('data-theme',th);
+}catch(e){}})();`;
+
+function readingSettingsPanel(lang: Lang): string {
+  const rs = (k: string): string => escapeHtml(t(lang, 'read.settings.' + k));
+  const seg = (group: string, opts: Array<[string, string]>): string =>
+    `<div class="rs-seg" data-group="${group}">` +
+    opts.map(([val, label]) => `<button type="button" data-val="${val}">${escapeHtml(t(lang, label))}</button>`).join('') +
+    `</div>`;
+  return `<button class="rs-toggle" id="rs-toggle" type="button" aria-expanded="false" aria-controls="rs-panel" title="${rs('title')}">Aa</button>
+<div class="rs-panel" id="rs-panel" hidden role="dialog" aria-label="${rs('title')}">
+<div class="rs-h">${rs('size')}</div>
+<div class="rs-row"><div class="rs-seg rs-size">
+<button type="button" class="s-sm" data-size="dec" aria-label="${rs('smaller')}">A&minus;</button>
+<button type="button" data-size="reset" aria-label="${rs('sizeReset')}">A</button>
+<button type="button" class="s-lg" data-size="inc" aria-label="${rs('larger')}">A+</button>
+</div></div>
+<div class="rs-h">${rs('typeface')}</div>
+${seg('family', [['serif', 'read.settings.serif'], ['sans', 'read.settings.sans'], ['readable', 'read.settings.readable']])}
+<div class="rs-h">${rs('width')}</div>
+${seg('width', [['34rem', 'read.settings.narrow'], ['42rem', 'read.settings.normal'], ['52rem', 'read.settings.wide']])}
+<div class="rs-h">${rs('spacing')}</div>
+${seg('lh', [['1.55', 'read.settings.cozy'], ['1.7', 'read.settings.normal'], ['1.9', 'read.settings.airy']])}
+<div class="rs-h">${rs('theme')}</div>
+${seg('theme', [['auto', 'read.settings.auto'], ['light', 'read.settings.light'], ['dark', 'read.settings.dark']])}
+<button class="rs-reset" id="rs-reset" type="button">${rs('reset')}</button>
+</div>`;
+}
+
+const READING_SETTINGS_JS = `(function(){
+var d=document.documentElement,tog=document.getElementById('rs-toggle'),panel=document.getElementById('rs-panel');
+if(!tog||!panel)return;
+var SIZES=[.85,1,1.15,1.3,1.5];
+function save(k,v){try{localStorage.setItem('shelf.rs.'+k,v);}catch(e){}}
+function cur(p,def){var v=getComputedStyle(d).getPropertyValue(p).trim();return v||def;}
+function open(){panel.hidden=false;tog.setAttribute('aria-expanded','true');sync();}
+function close(){tog.setAttribute('aria-expanded','false');panel.hidden=true;}
+tog.addEventListener('click',function(){panel.hidden?open():close();});
+document.addEventListener('click',function(e){if(!panel.hidden&&!panel.contains(e.target)&&e.target!==tog)close();});
+document.addEventListener('keydown',function(e){if(e.key==='Escape'&&!panel.hidden)close();});
+panel.querySelectorAll('[data-size]').forEach(function(b){b.addEventListener('click',function(){
+var act=b.getAttribute('data-size'),v=parseFloat(cur('--rfs','1'))||1;
+if(act==='reset')v=1;else{var i=SIZES.indexOf(v);if(i<0)i=1;i+=act==='inc'?1:-1;i=Math.max(0,Math.min(SIZES.length-1,i));v=SIZES[i];}
+d.style.setProperty('--rfs',String(v));save('size',String(v));
+});});
+function applyGroup(g,val){
+if(g==='family'){if(val==='serif')d.removeAttribute('data-family');else d.setAttribute('data-family',val);save('family',val);}
+else if(g==='width'){d.style.setProperty('--rmw',val);save('width',val);}
+else if(g==='lh'){d.style.setProperty('--rlh',val);save('lh',val);}
+else if(g==='theme'){if(val==='auto')d.removeAttribute('data-theme');else d.setAttribute('data-theme',val);save('theme',val);}
+}
+panel.querySelectorAll('[data-group]').forEach(function(seg){var g=seg.getAttribute('data-group');
+seg.querySelectorAll('button').forEach(function(b){b.addEventListener('click',function(){applyGroup(g,b.getAttribute('data-val'));sync();});});});
+var reset=document.getElementById('rs-reset');
+if(reset)reset.addEventListener('click',function(){
+['size','family','width','lh','theme'].forEach(function(k){try{localStorage.removeItem('shelf.rs.'+k);}catch(e){}});
+d.removeAttribute('data-family');d.removeAttribute('data-theme');
+d.style.removeProperty('--rfs');d.style.removeProperty('--rmw');d.style.removeProperty('--rlh');sync();
+});
+function sync(){
+var map={family:d.getAttribute('data-family')||'serif',theme:d.getAttribute('data-theme')||'auto',width:cur('--rmw','42rem'),lh:cur('--rlh','1.7')};
+panel.querySelectorAll('[data-group]').forEach(function(seg){var g=seg.getAttribute('data-group');
+seg.querySelectorAll('button').forEach(function(b){b.setAttribute('aria-pressed',String(b.getAttribute('data-val')===map[g]));});});
+}
+})();`;
+
 /** Wrap page body in the full HTML document, with the age gate when rated. */
 function bakedPage(
   bundle: PublishBundleV1,
@@ -395,11 +517,11 @@ function bakedPage(
 ${opts.body}
 </main>`;
 
-  const js = `${gated ? AGE_GATE_JS : ''}${opts.script ?? ''}`;
-  const script = js.length > 0 ? `<script>${js}</script>\n` : '';
+  const lang = langForWork(bundle.language);
+  const js = `${gated ? AGE_GATE_JS : ''}${opts.script ?? ''}${READING_SETTINGS_JS}`;
+  const script = `<script>${js}</script>\n`;
 
   const rtl = RTL_LANGUAGES.has(bundle.language.toLowerCase().split('-')[0] ?? '');
-  const lang = langForWork(bundle.language);
   return `<!doctype html>
 <html lang="${escapeHtml(bundle.language)}"${rtl ? ' dir="rtl"' : ''}>
 <head>
@@ -410,10 +532,12 @@ ${opts.body}
 <link rel="icon" href="${FAVICON_DATA_URI}">
 <title>${escapeHtml(opts.docTitle)}</title>
 <style>${THEME_CSS}${READING_CSS}</style>
+<script>${READING_SETTINGS_EARLY}</script>
 </head>
 <body>
 ${gated ? ageGate(bundle, lang) : ''}
 ${main}
+${readingSettingsPanel(lang)}
 ${script}</body>
 </html>`;
 }

@@ -67,6 +67,13 @@ const en: Dict = {
     toc: { heading: 'Contents', continue: 'Continue reading', continueTo: 'Continue —' },
     chapterN: 'Chapter', // "Chapter 3" when a chapter hides its title
     foot: { letter: 'Write to the author', report: 'Report this work', mark: 'Written with InkMirror', words: 'words' },
+    settings: {
+      title: 'Reading settings', size: 'Text size', smaller: 'Smaller text', larger: 'Larger text',
+      sizeReset: 'Default text size', typeface: 'Typeface', serif: 'Serif', sans: 'Sans',
+      readable: 'Readable', width: 'Width', narrow: 'Narrow', normal: 'Normal', wide: 'Wide',
+      spacing: 'Line spacing', cozy: 'Cozy', airy: 'Airy', theme: 'Theme', auto: 'Auto',
+      light: 'Light', dark: 'Dark', reset: 'Reset to defaults',
+    },
   },
   gate: {
     locked: 'This work is locked',
@@ -173,6 +180,13 @@ const hu: Dict = {
     toc: { heading: 'Tartalom', continue: 'Folytatás', continueTo: 'Folytatás —' },
     chapterN: 'fejezet', // Hungarian: "3. fejezet" — number precedes, handled at the call site
     foot: { letter: 'Írj a szerzőnek', report: 'Mű jelentése', mark: 'InkMirrorral írva', words: 'szó' },
+    settings: {
+      title: 'Olvasási beállítások', size: 'Betűméret', smaller: 'Kisebb betű', larger: 'Nagyobb betű',
+      sizeReset: 'Alapértelmezett méret', typeface: 'Betűtípus', serif: 'Talpas', sans: 'Talpatlan',
+      readable: 'Olvasható', width: 'Szélesség', narrow: 'Keskeny', normal: 'Normál', wide: 'Széles',
+      spacing: 'Sortávolság', cozy: 'Szűk', airy: 'Tágas', theme: 'Téma', auto: 'Auto',
+      light: 'Világos', dark: 'Sötét', reset: 'Alapértékek visszaállítása',
+    },
   },
   gate: {
     locked: 'Ez a mű zárolva van',

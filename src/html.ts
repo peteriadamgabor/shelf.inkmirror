@@ -41,6 +41,9 @@ export const THEME_CSS = `
   --serif:'Iowan Old Style','Palatino Linotype','Book Antiqua',Palatino,Georgia,serif;
   --sans:system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
 }
+/* Dark tokens as a reusable block so the reader's manual theme choice
+   (data-theme, set by the reading-settings panel) can win over the OS
+   preference in both directions. */
 @media (prefers-color-scheme: dark){
   :root{
     --bg:#1a1723;
@@ -53,6 +56,28 @@ export const THEME_CSS = `
     --teal:#2db5a8;
     --amber:#d98b3a;
   }
+}
+:root[data-theme="dark"]{
+  --bg:#1a1723;
+  --surface:#241f2d;
+  --ink:#e9e5ee;
+  --muted:#9b93a9;
+  --line:#37304a;
+  --violet:#918ae6;
+  --ember:#e0693f;
+  --teal:#2db5a8;
+  --amber:#d98b3a;
+}
+:root[data-theme="light"]{
+  --bg:#f2efe9;
+  --surface:#ffffff;
+  --ink:#2d2a26;
+  --muted:#7a7266;
+  --line:#e3ddd2;
+  --violet:#7F77DD;
+  --ember:#D85A30;
+  --teal:#0d9488;
+  --amber:#b45309;
 }
 *,*::before,*::after{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
