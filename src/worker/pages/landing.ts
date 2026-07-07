@@ -86,8 +86,8 @@ export function landingPage(lang: Lang = 'en'): Response {
 <p class="tagline">${tagline}</p>
 <p class="sub">${escapeHtml(t(lang, 'landing.sub'))}</p>
 <div class="ctas">
-<a class="cta-primary" href="https://inkmirror.cc" rel="noopener">${escapeHtml(t(lang, 'landing.ctaWrite'))}</a>
-<a class="cta-secondary" href="/shelf">${escapeHtml(t(lang, 'landing.ctaBrowse'))}</a>
+<a class="cta-primary" href="/shelf">${escapeHtml(t(lang, 'landing.ctaBrowse'))}</a>
+<a class="cta-secondary" href="https://inkmirror.cc" rel="noopener">${escapeHtml(t(lang, 'landing.ctaWrite'))}</a>
 </div>
 <a class="cta-sample" href="${DEMO_WORK_URL}">${t(lang, 'landing.ctaSample')}</a>
 <p class="fine">${fine}</p>
