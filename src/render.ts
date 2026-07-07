@@ -347,6 +347,12 @@ main{max-width:var(--rmw);margin:0 auto;padding:0 1.25rem 4rem;position:relative
 .ch-nav-top{margin:.9rem 0 0}
 .ch-nav-bottom{border-top:1px solid var(--line);margin-top:3rem;padding-top:1.2rem}
 
+/* ---------- reading progress ---------- */
+.reading-progress{position:fixed;top:0;left:0;height:3px;width:0;z-index:30;
+  background:linear-gradient(90deg,var(--violet),color-mix(in srgb,var(--violet) 70%,var(--ember)));
+  transition:width .1s linear}
+@media (prefers-reduced-motion: reduce){.reading-progress{transition:none}}
+
 /* ---------- reading settings ---------- */
 .rs-toggle{position:fixed;right:1rem;bottom:1rem;z-index:20;width:2.9rem;height:2.9rem;
   border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--ink);
@@ -537,6 +543,42 @@ if(url)location.href=url;
 },{passive:true});
 })();`;
 
+/**
+ * Reading quality-of-life for the long-scroll chapters:
+ *   - a top progress bar tracking how far through the chapter you've read;
+ *   - EXACT resume — the scroll position is saved (per chapter URL) and
+ *     restored on return, so "Continue reading" lands you where you actually
+ *     stopped, not at the chapter top. Stored as a fraction so it survives a
+ *     text-size change;
+ *   - ArrowLeft / ArrowRight turn the page on desktop (RTL-aware), the
+ *     keyboard companion to swipe.
+ */
+const READING_QOL_JS = `(function(){
+var doc=document.documentElement,work=document.getElementById('work'),bar=document.getElementById('rprog');
+if(!work)return;
+var KEY='shelf.scroll.'+location.pathname;
+function maxScroll(){return doc.scrollHeight-window.innerHeight;}
+// Restore after two frames so reader-settings layout has settled. Skipped
+// while the age gate hides the prose (nothing to scroll yet).
+if(!work.hidden){try{var f=parseFloat(localStorage.getItem(KEY)||'');
+if(f>0&&f<=1)requestAnimationFrame(function(){requestAnimationFrame(function(){
+var m=maxScroll();if(m>40)window.scrollTo(0,f*m);});});}catch(e){}}
+var raf=0;
+function tick(){raf=0;var m=maxScroll();var f=m>0?Math.min(1,Math.max(0,window.scrollY/m)):0;
+if(bar)bar.style.width=(f*100).toFixed(1)+'%';
+try{localStorage.setItem(KEY,f.toFixed(4));}catch(e){}}
+window.addEventListener('scroll',function(){if(!raf)raf=requestAnimationFrame(tick);},{passive:true});
+tick();
+document.addEventListener('keydown',function(e){
+if(e.defaultPrevented||e.altKey||e.ctrlKey||e.metaKey||e.shiftKey)return;
+var tg=e.target;if(tg&&/^(INPUT|TEXTAREA|SELECT)$/.test(tg.tagName))return;
+if(e.key!=='ArrowLeft'&&e.key!=='ArrowRight')return;
+var rtl=doc.getAttribute('dir')==='rtl',fwd=rtl?e.key==='ArrowLeft':e.key==='ArrowRight';
+var a=document.querySelector(fwd?'a[rel="next"]':'a[rel="prev"]');
+if(a&&a.tagName==='A'){e.preventDefault();location.href=a.getAttribute('href');}
+});
+})();`;
+
 /** Wrap page body in the full HTML document, with the age gate when rated. */
 function bakedPage(
   bundle: PublishBundleV1,
@@ -548,7 +590,7 @@ ${opts.body}
 </main>`;
 
   const lang = langForWork(bundle.language);
-  const js = `${gated ? AGE_GATE_JS : ''}${opts.script ?? ''}${READING_SETTINGS_JS}${READING_SWIPE_JS}`;
+  const js = `${gated ? AGE_GATE_JS : ''}${opts.script ?? ''}${READING_SETTINGS_JS}${READING_SWIPE_JS}${READING_QOL_JS}`;
   const script = `<script>${js}</script>\n`;
 
   const rtl = RTL_LANGUAGES.has(bundle.language.toLowerCase().split('-')[0] ?? '');
@@ -565,6 +607,7 @@ ${opts.body}
 <script>${READING_SETTINGS_EARLY}</script>
 </head>
 <body>
+<div class="reading-progress" id="rprog" aria-hidden="true"></div>
 ${gated ? ageGate(bundle, lang) : ''}
 ${main}
 ${readingSettingsPanel(lang)}
